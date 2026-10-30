@@ -1,0 +1,12 @@
+{
+  "name": "tdtl",
+  "description": "Плагины команды автоматизации",
+  "owner": { "name": "TDTL-projects" },
+  "plugins": [
+    {
+      "name": "tdtl-team",
+      "source": "./plugins/tdtl-team",
+      "description": "Работа команды с трекером: мои задачи, журнал, новые задачи, менеджер, путь разработки"
+    }
+  ]
+}
