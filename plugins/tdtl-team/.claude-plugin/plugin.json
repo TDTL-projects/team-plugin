@@ -1,7 +1,7 @@
 {
   "name": "tdtl-team",
   "displayName": "Ариадна — команда TDTL",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Работа команды автоматизации с трекером через Claude: мои задачи, журнал работы, новые задачи и решения, менеджер проекта, путь задачи в разработку",
   "author": { "name": "TDTL-projects" },
   "repository": "https://github.com/TDTL-projects/team-plugin"
