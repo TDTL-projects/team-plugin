@@ -17,11 +17,14 @@
 Установка в Claude Code:
 
 ```
-/plugin install tdtl-team --marketplace TDTL-projects/team-plugin
+/plugin marketplace add TDTL-projects/team-plugin
+/plugin install tdtl-team@tdtl
 ```
+
+`tdtl` — имя маркетплейса из `.claude-plugin/marketplace.json`.
 
 В приложении Claude: «Персонализация» → «Плагины» → «+ Добавить» → «Добавить маркетплейс» → `TDTL-projects/team-plugin`.
 
-Навыкам нужен коннектор «Трекер», навыку `publish-to-drive` — ещё коннектор Google Drive. Как всё подключить — документ «Как подключить Claude к трекеру» в корне общего диска «Цифровизация TD-TL» (Google Диск → «Общие диски»).
+Навыкам нужен коннектор «Трекер», навыку `publish-to-drive` — ещё коннектор Google Drive. Как всё устроено и как подключить — презентация [«P-04 Как мы работаем: трекер, Диск, Claude, боты»](https://docs.google.com/presentation/d/1iF77wKGaXSBOX0mIT2mcS1yY-QSCbz2HKymc3P_1D-Q/edit) в корне общего диска «Цифровизация TD-TL» (Google Диск → «Общие диски»), раздел «Приложение · Настройка».
 
 Правки навыков — через PR в этот репозиторий; при каждой правке поднимать `version` в `plugins/tdtl-team/.claude-plugin/plugin.json`. После слияния плагин обновится у всех, у кого включена синхронизация маркетплейса.
