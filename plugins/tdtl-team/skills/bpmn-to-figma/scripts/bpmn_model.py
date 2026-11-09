@@ -53,6 +53,14 @@ def color(el, which):
     return None
 
 
+def check_out(src, out, ext):
+    """Выходной файл — только новый .js/.svg, не сам .bpmn: перепутанные аргументы не должны стереть схему."""
+    if not out.lower().endswith(ext):
+        raise SystemExit("Выходной файл должен оканчиваться на %s: %s" % (ext, out))
+    if os.path.exists(out) and os.path.samefile(src, out):
+        raise SystemExit("Выходной файл совпадает со входным .bpmn — ничего не записано")
+
+
 def note_class(text):
     head = text.lstrip()[:40]
     for word, cls in NOTE_KINDS:

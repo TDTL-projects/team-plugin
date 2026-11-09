@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from bpmn_model import parse  # noqa: E402
+from bpmn_model import check_out, parse  # noqa: E402
 
 S, P, T, ST = 1.5, 40, 160, 45   # масштаб по умолчанию, отступ слева, место под заголовок, ширина полосы подписей дорожек
 LIMIT = 49000                    # предел длины кода для use_figma (50 000 символов) с запасом
@@ -64,6 +64,9 @@ def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, 
     def z(v):
         return round(v * S)
 
+    def zs(v):   # размер: FigJam не принимает 0 (Bounds width="0" в .bpmn уронил бы скрипт посреди обновления)
+        return max(1, z(v))
+
     refs = {}
     for el in ET.parse(src).getroot().iter():
         if el.get("sourceRef") and el.get("targetRef") and el.get("id"):
@@ -76,16 +79,16 @@ def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, 
         if s["k"] == "participant":
             continue
         if s["k"] == "lane":
-            items.append(prune(dict(t="lane", id=s["id"], n=s["n"], x=P, y=xy(x0, y)[1], w=ST + z(x1 - x0), h=z(h))))
+            items.append(prune(dict(t="lane", id=s["id"], n=s["n"], x=P, y=xy(x0, y)[1], w=ST + zs(x1 - x0), h=zs(h))))
             continue
         if not (x0 <= x + w / 2 <= x1):
             continue
         nx, ny = xy(x, y)
-        it = dict(id=s["id"], n=s["n"], k=s["k"], x=nx, y=ny, w=z(w), h=z(h),
+        it = dict(id=s["id"], n=s["n"], k=s["k"], x=nx, y=ny, w=zs(w), h=zs(h),
                   fill=s.get("fill"), stroke=s.get("stroke"), ev=s.get("ev"))
         if s.get("lb"):
             it["lx"], it["ly"] = xy(s["lb"][0], s["lb"][1])
-            it["lw"] = z(s["lb"][2])
+            it["lw"] = zs(s["lb"][2])
         items.append(prune(it))
     if not any(i.get("t") != "lane" for i in items):
         raise SystemExit("В выбранном окне схемы нет ни одного блока — переносить нечего (проверьте --groups или --x0/--x1)")
@@ -103,10 +106,7 @@ def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, 
         if st and st[0] in ids and st[1] in ids:
             edges.append(prune(dict(id=e["id"], n=e["n"], k=e["k"], s=st[0], t=st[1],
                                     ms=side(e["p"][0], B[st[0]]), me=side(e["p"][-1], B[st[1]]))))
-    ids_all = [i["id"] for i in items]
-    pfx = os.path.commonprefix(ids_all)
-    pfx = pfx[:pfx.rfind("_") + 1]   # общий префикс id (BRK-TOBE_): узлы старой выкладки без него тоже узнаются
-    data = prune(dict(title=title, page=page, sectionId=section, S=S, pfx=pfx, ST=ST, force=force or None,
+    data = prune(dict(title=title, page=page, sectionId=section, S=S, ST=ST, force=force or None,
                       W=round(z(x1 - x0) + ST + 2 * P), H=round(max(i["y"] + i["h"] for i in items) + P),
                       items=items, edges=edges))
     with open(os.path.join(HERE, "figjam_tpl.js"), encoding="utf-8") as f:
@@ -139,6 +139,7 @@ def main():
         return
     if not a.out or not a.title:
         ap.error("нужны out.js и --title")
+    check_out(a.src, a.out, ".js")
     js, shapes, lanes, edges = build(a.src, a.title, a.x0, a.x1,
                                      a.groups.split(",") if a.groups else None, a.section, a.force, a.scale, a.page)
     if len(js) > LIMIT:

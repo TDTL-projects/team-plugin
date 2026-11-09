@@ -70,28 +70,29 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   const sec = author.children.find(n => n.type === 'SECTION');
   ok(sec, 'секции нет на странице автора');
   const total = sec.children.length;
-  // люди добавили своё: листочки (в том числе латиницей «слово · …»), фигуру, текст с « · », копию блока (Ctrl+D)
-  mine = [['STICKY', 'Sticky'], ['SHAPE_WITH_TEXT', 'Мой блок'], ['TEXT', 'Заметка · важно'],
-    ['STICKY', 'TODO · уточнить'], ['TEXT', 'Step2 · проверить']].map(([t, n]) => human(sec, t, n));
   const orig = sec.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n.getSharedPluginData('tdtl_bpmn', 'key'));
+  const short = orig.getSharedPluginData('tdtl_bpmn', 'key').split('|')[0].replace(/^.*?_/, '');   // B03 из BRK-TOBE_B03
+  // люди добавили своё: листочки (в том числе латиницей «слово · …» и с id блока из схемы), фигуру и текст с id из схемы,
+  // текст «заголовок», копию нашего блока (Ctrl+D, та же метка)
+  mine = [['STICKY', 'Sticky'], ['SHAPE_WITH_TEXT', 'Мой блок'], ['TEXT', 'Заметка · важно'],
+    ['STICKY', 'TODO · уточнить'], ['TEXT', 'Step2 · проверить'], ['STICKY', short + ' · уточнить у Андрея'],
+    ['SHAPE_WITH_TEXT', orig.name], ['TEXT', short + ' · подпись'], ['TEXT', 'заголовок']].map(([t, n]) => human(sec, t, n));
+  for (const n of mine) { n.x = -500; n.y = -500; n.text = {characters: 'своё', fontName: {family: 'Inter', style: 'Medium'}}; }
   const copy = human(sec, orig.type, orig.name); copy.spd = {...orig.spd}; copy.x = orig.x + 30; copy.y = orig.y + 30;
   mine.push(copy);
-  const alive = () => mine.every(n => n.parent === sec);
+  // узел людей на месте и не тронут: та же секция, место, текст, без нашей метки
+  const alive = () => mine.every(n => n.parent === sec && (n === copy || (n.x === -500 && n.y === -500 && n.text.characters === 'своё' && !n.spd['tdtl_bpmn/key'])));
   const origId = orig.getSharedPluginData('tdtl_bpmn', 'key').split('|')[0];
 
   const r2 = await run(again);
   ok(!r2.fresh && r2.created === 0 && r2.removed.length === 0 && r2.moved.length === 0, 'повтор без изменений: ' + JSON.stringify(r2));
   ok(alive() && sec.children.length === total + mine.length, 'свои узлы людей пропали');
-  ok(r2.dups && r2.dups.includes(origId), 'копия блока не названа в dups: ' + JSON.stringify(r2.dups));
-
-  // старая выкладка без меток (как у Даниила до правки): узнаётся по именам слоёв, но только по id из схемы
+  ok(JSON.stringify(r2.dups) === JSON.stringify([origId]), 'в dups не только копия блока: ' + JSON.stringify(r2.dups));
   const before = pos(sec);
-  for (const n of sec.children) n.spd = {};
-  sec.setSharedPluginData('tdtl_bpmn', 'scale', '1.5');
-  const r3 = await run(again);
-  ok(r3.created === 0 && r3.removed.length === 0, 'старая выкладка не узнана: ' + JSON.stringify(r3));
-  ok(alive(), 'при узнавании по именам удалены узлы людей');
 
+  // человек растянул секцию и положил листочек за край схемы
+  sec.resize(sec.width + 3000, sec.height + 2000);
+  const big = [sec.width, sec.height];
   sec.fills = [{type: 'SOLID', color: {r: 0.9, g: 0.95, b: 1}}];
   const fill = JSON.stringify(sec.fills);
   // цвет из .bpmn не в виде #rrggbb не роняет обновление посередине
@@ -101,16 +102,16 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   ok(shifted.length === r4.moved.length, 'список сдвинутых не совпадает с доской: ' + shifted.length + ' / ' + r4.moved.length);
   ok(alive(), 'листочек или копия блока удалены при обновлении');
   ok(JSON.stringify(sec.fills) === fill, 'фон секции перекрашен при обновлении');
+  ok(sec.width >= big[0] && sec.height >= big[1], 'растянутую секцию ужали: ' + [sec.width, sec.height] + ' < ' + big);
 
   // другой масштаб: стоп без изменений
   sec.setSharedPluginData('tdtl_bpmn', 'scale', '1');
   await fails(next, null, /Масштаб/, 'другой масштаб не остановил');
 
   // код, собранный с другим --scale, на секции с прежним масштабом: стоп без изменений
-  if (other) {
-    sec.setSharedPluginData('tdtl_bpmn', 'scale', fs.readFileSync(next, 'utf8').match(/"S":([\d.]+)/)[1]);
-    await fails(other, null, /Масштаб/, '--scale не остановил');
-  }
+  sec.setSharedPluginData('tdtl_bpmn', 'scale', fs.readFileSync(next, 'utf8').match(/"S":([\d.]+)/)[1]);
+  if (other) await fails(other, null, /Масштаб/, '--scale не остановил');
+  // дальше масштаб совпадает: каждая остановка ниже срабатывает по своей причине, а не по масштабу
 
   // --section лежит на одной странице, --page — другая: стоп
   await fails(next, {sectionId: sec.id, page: 'Общий'}, /страниц/, '--section не на странице --page');
@@ -118,10 +119,13 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   // чужая секция с тем же заголовком (нарисована руками, метки нет): стоп, ничего не тронуто
   const foreign = Object.assign(new N('SECTION'), {name: title}); common.appendChild(foreign);
   const theirs = [human(foreign, 'STICKY', 'TODO · уточнить'), human(foreign, 'SHAPE_WITH_TEXT', 'Шаг 1')];
-  await fails(base, {page: 'Общий'}, /--section/, 'чужая секция с тем же заголовком принята за свою');
-  // человек сам указал эту секцию через --section: скрипт рисует в ней, своё людей не трогает
-  const r5 = await run(base, {page: undefined, sectionId: foreign.id});
-  ok(r5.created > 0 && theirs.every(n => n.parent === foreign), 'в указанной секции удалены узлы людей: ' + JSON.stringify(r5));
+  await fails(base, {page: 'Общий'}, /не этот скрипт/, 'чужая секция с тем же заголовком принята за свою');
+  // --section на секции людей (нет метки) — тоже стоп: её скрипт не трогает никогда
+  await fails(base, {page: undefined, sectionId: foreign.id}, /не этот скрипт/, '--section на чужой секции не остановил');
+  ok(theirs.every(n => n.parent === foreign), 'в чужой секции тронуты узлы людей');
+
+  // схема перенесена частями, у каждой своя секция: --section от другой части — стоп, а не перерисовка чужой части
+  await fails(next, d => { d.sectionId = sec.id; delete d.page; d.title = title + ' · этап 06'; }, /называется/, '--section от другой части не остановил');
 
   console.log('все проверки прошли | первый перенос: ' + r1.created + ' узлов | новая версия: создано ' + r4.created +
     ', удалено ' + r4.removed.length + ', сдвиг холста погашен ' + JSON.stringify(r4.shift) + ', сдвинуто блоков ' + r4.moved.length +

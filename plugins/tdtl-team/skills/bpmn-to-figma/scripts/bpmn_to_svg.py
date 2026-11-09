@@ -24,7 +24,7 @@ from xml.sax.saxutils import escape
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from bpmn_model import parse  # noqa: E402
+from bpmn_model import check_out, parse  # noqa: E402
 
 FONT = "Noto Sans"
 with open(os.path.join(HERE, "noto_sans_widths.json"), encoding="utf-8") as _f:
@@ -395,6 +395,7 @@ def main():
     ap.add_argument("--title", required=True,
                     help="заголовок схемы: «КОД Название · как есть / как будет» (D-0026)")
     a = ap.parse_args()
+    check_out(a.src, a.dst, ".svg")
     model = parse(a.src)
     svg = render(model, a.title)
     with open(a.dst, "w", encoding="utf-8") as f:
