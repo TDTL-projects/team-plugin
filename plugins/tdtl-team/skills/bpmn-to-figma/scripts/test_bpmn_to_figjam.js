@@ -139,6 +139,18 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   ok(JSON.stringify(sec.fills) === fill, 'фон секции перекрашен при обновлении');
   ok(sec.width >= big[0] && sec.height >= big[1], 'растянутую секцию ужали: ' + [sec.width, sec.height] + ' < ' + big);
 
+  // человек скопировал блок и написал в копии свой вариант; блок убрали из схемы (скрипт удалил оригинал), потом вернули.
+  // Копия не должна стать «вырезанным и вставленным» блоком: её не трогаем, блок рисуется заново.
+  const kNode = sec.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n !== orig && n !== lsrc && !mine.includes(n) && !extra.includes(n) && n.spd['tdtl_bpmn/node'] === n.id);
+  const kId = kNode.spd['tdtl_bpmn/key'].split('|')[0];
+  const kCopy = Object.assign(new N(kNode.type), {name: kNode.name, x: kNode.x + 60, y: kNode.y, spd: {...kNode.spd},
+    text: {characters: 'Вариант В', fontName: {family: 'Inter', style: 'Medium'}}});
+  sec.appendChild(kCopy); extra.push(kCopy); const kc = look(kCopy);
+  const r4a = await run(next, d => { d.items = d.items.filter(i => i.id !== kId); d.edges = d.edges.filter(e => e.s !== kId && e.t !== kId); });
+  ok(r4a.removed.includes(kId) && !kNode.parent && look(kCopy) === kc, 'блок не удалён или тронута его копия: ' + JSON.stringify(r4a.removed));
+  const r4b = await run(next);
+  ok(r4b.created > 0 && look(kCopy) === kc && !r4b.moved.includes(kId), 'копию затёрли, когда блок вернули в схему: ' + JSON.stringify([kCopy.x, kCopy.text.characters, r4b.moved]));
+
   // другой масштаб: стоп без изменений
   sec.setSharedPluginData('tdtl_bpmn', 'scale', '1');
   await fails(next, null, /Масштаб/, 'другой масштаб не остановил');

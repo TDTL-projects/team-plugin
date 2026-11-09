@@ -10,8 +10,10 @@ const stop = (m) => { throw new Error(m + ' Ничего не изменено.'
 // Наш узел или секция — с меткой, которую поставил скрипт, и со своим же id в метке node. Копия (Ctrl+D) или вставка
 // из другой секции несёт метки оригинала, но id у неё новый: пока оригинал на доске, она не наша. Оригинала больше нет —
 // узел вырезали и вставили (Ctrl+X → Ctrl+V, перенос схемы на «Общий»): он наш. Без node — узлы прежней версии скрипта.
-const cut = new Set();
-const check = async (n) => { const id = n.getSharedPluginData(NS, 'node'); if (id && id !== n.id && !(await figma.getNodeByIdAsync(id))) cut.add(n.id); };
+// Оригинал мог пропасть и потому, что его удалил сам скрипт (блок убрали из схемы): копия такого блока — не вырезанный блок.
+// Поэтому id удалённых скриптом узлов хранятся в секции (метка gone).
+const cut = new Set(); let gone = new Set();
+const check = async (n) => { const id = n.getSharedPluginData(NS, 'node'); if (id && id !== n.id && !gone.has(id) && !(await figma.getNodeByIdAsync(id))) cut.add(n.id); };
 const ours = (n, k) => { if (!n.getSharedPluginData(NS, k)) return false; const id = n.getSharedPluginData(NS, 'node'); return !id || id === n.id || cut.has(n.id); };
 const stamp = (n) => n.setSharedPluginData(NS, 'node', n.id);
 
@@ -59,6 +61,7 @@ if (!fresh) {
 
 // 2. Узлы прошлой выкладки — только с нашей меткой tdtl_bpmn/key. По имени слоя не узнаём: листочек «B03 · уточнить»
 //    выглядит как наш блок. Листочки, фигуры и тексты людей не трогаем; копию нашего блока (Ctrl+D, та же метка) — тоже.
+gone = new Set((sec ? sec.getSharedPluginData(NS, 'gone') : '').split(',').filter(Boolean));
 for (const n of (sec ? sec.children : [])) if (n.getSharedPluginData(NS, 'key')) await check(n);
 const keyOf = (n) => ours(n, 'key') ? n.getSharedPluginData(NS, 'key') : null;
 const old = {}, dup = new Set();
@@ -176,5 +179,6 @@ const all = new Set(['title', ...want]); for (const i of D.items) for (const p o
 const removed = [], dups = new Set(), unknown = new Set();
 for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n); if (!k) continue;
   if (rank(n) !== 0 || dup.has(k)) { (all.has(k) ? dups : unknown).add(k.split('|')[0]); continue; }
-  if (k.endsWith('|main')) removed.push(k.split('|')[0]); n.remove(); }
+  if (k.endsWith('|main')) removed.push(k.split('|')[0]); gone.add(n.id); n.remove(); }
+sec.setSharedPluginData(NS, 'gone', [...gone].slice(-3000).join(','));   // последние 3000 — с запасом под предел метки
 return {page: page.name, section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved, dups: [...dups], unknown: [...unknown]};
