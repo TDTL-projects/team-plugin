@@ -51,7 +51,8 @@ const fails = async (file, patch, re, msg) => {
   ok(snap === board(), msg + ': доска изменилась');
 };
 let mine = [];   // узлы, которые добавили люди (в том числе копия нашего блока с той же меткой)
-const pos = (sec) => Object.fromEntries(sec.children.filter(n => !mine.includes(n) && n.getSharedPluginData('tdtl_bpmn', 'key').endsWith('|main'))
+const extra = [];   // ещё узлы людей с нашей меткой, добавленные позже (в позиции блоков схемы не входят)
+const pos = (sec) => Object.fromEntries(sec.children.filter(n => !mine.includes(n) && !extra.includes(n) && n.getSharedPluginData('tdtl_bpmn', 'key').endsWith('|main'))
   .map(n => [n.getSharedPluginData('tdtl_bpmn', 'key').replace(/^.*?_/, ''), [Math.round(n.x), Math.round(n.y)]]));
 const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.appendChild(n); return n; };
 
@@ -106,10 +107,18 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   const legacyPaste = human(sec, 'SHAPE_WITH_TEXT', 'BRK-ASIS_Y01 · Блок из «как есть»'); legacyPaste.x = -900; legacyPaste.y = -900;
   legacyPaste.spd = {'tdtl_bpmn/key': 'BRK-ASIS_Y01|main'}; legacyPaste.text = {characters: 'старая вставка', fontName: {family: 'Inter', style: 'Medium'}};
   const lp = look(legacyPaste);
+  // и копия блока, сделанная людьми на секции прежней версии (Ctrl+D, сразу после оригинала, тоже без node)
+  const lsrc = sec.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n !== orig && !mine.includes(n) && n.spd['tdtl_bpmn/key']);
+  const legacyCopy = Object.assign(new N(lsrc.type), {name: lsrc.name, x: lsrc.x + 50, y: lsrc.y, spd: {...lsrc.spd},
+    text: {characters: 'копия прежней версии', fontName: {family: 'Inter', style: 'Medium'}}});
+  sec.children.splice(sec.children.indexOf(lsrc) + 1, 0, legacyCopy); legacyCopy.parent = sec;
+  const lcId = lsrc.spd['tdtl_bpmn/key'].split('|')[0], lc = look(legacyCopy); extra.push(legacyCopy);
+  const lsrcX = lsrc.x;
   const r3 = await run(again);
   ok(r3.created === 0 && r3.removed.length === 0 && look(legacyPaste) === lp, 'на секции прежней версии вставка удалена или тронута: ' + JSON.stringify(r3));
+  ok(look(legacyCopy) === lc && r3.dups.includes(lcId), 'копия на секции прежней версии тронута или не названа в dups: ' + JSON.stringify(r3.dups));
   ok(JSON.stringify(r3.unknown) === '["BRK-ASIS_Y01"]', 'вставка без метки node не названа в unknown: ' + JSON.stringify(r3.unknown));
-  ok(sec.children.every(n => n === legacyPaste || mine.includes(n) || n.spd['tdtl_bpmn/node'] === n.id), 'свои узлы прежней версии не получили метку node');
+  ok(sec.children.every(n => n === legacyPaste || n === legacyCopy || mine.includes(n) || n.spd['tdtl_bpmn/node'] === n.id), 'свои узлы прежней версии не получили метку node');
   ok(alive(), 'на секции прежней версии тронуты узлы людей');
 
   const before = pos(sec);
@@ -125,6 +134,8 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   const shifted = Object.keys(before).filter(k => k in after && (before[k][0] !== after[k][0] || before[k][1] !== after[k][1]));
   ok(shifted.length === r4.moved.length, 'список сдвинутых не совпадает с доской: ' + shifted.length + ' / ' + r4.moved.length);
   ok(alive(), 'листочек или копия блока удалены при обновлении');
+  // второй запуск: оригинал уже со своей меткой node, копия прежней версии — нет; её всё равно не удаляем
+  ok(look(legacyCopy) === lc && r4.dups.includes(lcId) && !r4.removed.includes(lcId), 'копия прежней версии удалена на втором запуске: ' + JSON.stringify([r4.dups, r4.removed]));
   ok(JSON.stringify(sec.fills) === fill, 'фон секции перекрашен при обновлении');
   ok(sec.width >= big[0] && sec.height >= big[1], 'растянутую секцию ужали: ' + [sec.width, sec.height] + ' < ' + big);
 
@@ -182,6 +193,11 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   // блок вставлен из другого файла: оригинала в этом файле нет, ключа в схеме нет — не удаляем, называем в unknown
   const foreignFile = human(moved, 'SHAPE_WITH_TEXT', 'OTHER_Z1 · Блок из другого файла');
   foreignFile.spd = {'tdtl_bpmn/key': 'OTHER_Z1|main', 'tdtl_bpmn/node': 'n888888'};
+  // блок вставлен из другого файла, и такой ключ в схеме есть: оригинала в этом файле нет, свой блок на месте — не удаляем, в dups
+  const twinSrc = moved.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n !== orig && n !== blk2 && !twins.includes(n) && n !== lsrc && !mine.includes(n) && n.spd['tdtl_bpmn/node'] === n.id);
+  const fromFile = Object.assign(new N(twinSrc.type), {name: twinSrc.name, x: -1200, y: -1200, spd: {...twinSrc.spd, 'tdtl_bpmn/node': 'n999999'},
+    text: {characters: 'из другого файла', fontName: {family: 'Inter', style: 'Medium'}}}); moved.appendChild(fromFile);
+  const ffId = twinSrc.spd['tdtl_bpmn/key'].split('|')[0];
   const count = moved.children.length;
   const r6 = await run(next, {page: undefined, sectionId: moved.id});
   ok(r6.created === 0 && r6.removed.length === 0, 'вырезанная и вставленная секция не обновилась на месте: ' + JSON.stringify(r6));
@@ -189,7 +205,11 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
     'вырезанный блок или секция не стали своими');
   ok(mine.every(n => n.parent === moved) && pasted.text.characters === 'из другой секции', 'при переносе тронуты узлы людей');
   ok(foreignFile.parent === moved && r6.unknown.includes('OTHER_Z1'), 'вставка из другого файла удалена или не названа в unknown: ' + JSON.stringify(r6.unknown));
-  ok(JSON.stringify(r6.dups) === JSON.stringify([blk3Id]) && twins.every(n => n.parent === moved), 'копия, вырезанная вместе с оригиналом, не названа в dups или удалена: ' + JSON.stringify(r6.dups));
+  ok(fromFile.parent === moved && fromFile.x === -1200 && fromFile.text.characters === 'из другого файла' && r6.dups.includes(ffId),
+    'вставка из другого файла с ключом из схемы удалена, тронута или не названа в dups: ' + JSON.stringify(r6.dups));
+  ok(legacyCopy.parent === moved && legacyCopy.x === lsrcX + 50 && legacyCopy.text.characters === 'копия прежней версии' && r6.dups.includes(lcId),
+    'копию прежней версии обновили вместо вырезанного оригинала: ' + JSON.stringify([legacyCopy.x, legacyCopy.text.characters, r6.dups]));
+  ok(r6.dups.includes(blk3Id) && twins.every(n => n.parent === moved), 'копия, вырезанная вместе с оригиналом, не названа в dups или удалена: ' + JSON.stringify(r6.dups));
 
   console.log('все проверки прошли | первый перенос: ' + r1.created + ' узлов | новая версия: создано ' + r4.created +
     ', удалено ' + r4.removed.length + ', сдвиг холста погашен ' + JSON.stringify(r4.shift) + ', сдвинуто блоков ' + r4.moved.length +

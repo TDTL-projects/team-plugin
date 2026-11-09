@@ -62,9 +62,10 @@ if (!fresh) {
 for (const n of (sec ? sec.children : [])) if (n.getSharedPluginData(NS, 'key')) await check(n);
 const keyOf = (n) => ours(n, 'key') ? n.getSharedPluginData(NS, 'key') : null;
 const old = {}, dup = new Set();
-// Несколько узлов с одной меткой: сначала тот, у кого в node свой id, потом узел прежней версии, потом вырезанный.
-// Равных несколько (копия и оригинал вместе вырезаны и вставлены) — берём первый и называем в dups.
-const rank = (n) => { const id = n.getSharedPluginData(NS, 'node'); return id === n.id ? 0 : !id ? 1 : 2; };
+// Несколько узлов с одной меткой: сначала тот, у кого в node свой id, потом вырезанный (метку node ставит только эта
+// версия скрипта — значит, он был нашим), потом узел без node (после первого обновления такой остаётся только у копии,
+// сделанной людьми до него). Равных несколько (вся секция прежней версии; копия вырезана вместе с оригиналом) — первый, в dups.
+const rank = (n) => { const id = n.getSharedPluginData(NS, 'node'); return id === n.id ? 0 : id ? 1 : 2; };
 for (const n of (sec ? sec.children : [])) { const k = keyOf(n); if (!k) continue;
   if (!old[k]) { old[k] = n; continue; } const a = rank(n), b = rank(old[k]); if (a === b) dup.add(k); else if (a < b) old[k] = n; }
 // Совпала меньше половины своих блоков и стрелок — в секции другая схема или другая часть с тем же --title: перерисовка стёрла бы её.
@@ -168,14 +169,12 @@ for (const e of D.edges) {
   c.text.fontName = R; c.text.fontSize = 11; c.text.characters = e.n||'';
   c.name = e.id + ' · ' + (e.n||''); nc++;
 }
-// 4. Удаляем только свои узлы, которых больше нет в .bpmn. Копии и вставки — не наши (ours), их не трогаем.
-//    Повтор метки бывает только у копий, сделанных до этой версии скрипта: не трогаем, называем в dups.
-//    Узел прежней версии (без метки node) или вырезанный и вставленный, чьего ключа нет в схеме, может быть вставкой из другой
-//    секции или другого файла: не трогаем, называем в unknown.
+// 4. Удаляем только узлы, которые точно наши: в метке node их собственный id, и их больше нет в .bpmn.
+//    Остальные незадействованные узлы с нашей меткой не трогаем: копию прежней версии, вставку из другого файла,
+//    двойника после вырезки, блок прежней версии, убранный из схемы. С ключом из схемы — в dups, без него — в unknown.
 const all = new Set(['title', ...want]); for (const i of D.items) for (const p of ['подпись','полоса']) all.add(i.id + '|' + p);
 const removed = [], dups = new Set(), unknown = new Set();
 for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n); if (!k) continue;
-  if (dup.has(k)) { dups.add(k.split('|')[0]); continue; }
-  if ((!n.getSharedPluginData(NS, 'node') || cut.has(n.id)) && !all.has(k)) { unknown.add(k.split('|')[0]); continue; }
+  if (rank(n) !== 0 || dup.has(k)) { (all.has(k) ? dups : unknown).add(k.split('|')[0]); continue; }
   if (k.endsWith('|main')) removed.push(k.split('|')[0]); n.remove(); }
 return {page: page.name, section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved, dups: [...dups], unknown: [...unknown]};
