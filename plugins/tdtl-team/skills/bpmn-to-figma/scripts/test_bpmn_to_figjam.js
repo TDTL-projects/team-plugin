@@ -73,21 +73,29 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   const orig = sec.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n.getSharedPluginData('tdtl_bpmn', 'key'));
   const short = orig.getSharedPluginData('tdtl_bpmn', 'key').split('|')[0].replace(/^.*?_/, '');   // B03 из BRK-TOBE_B03
   // люди добавили своё: листочки (в том числе латиницей «слово · …» и с id блока из схемы), фигуру и текст с id из схемы,
-  // текст «заголовок», копию нашего блока (Ctrl+D, та же метка)
+  // текст «заголовок», копию нашего блока (Ctrl+D, те же метки) и блок, вставленный из другой секции (с её метками)
   mine = [['STICKY', 'Sticky'], ['SHAPE_WITH_TEXT', 'Мой блок'], ['TEXT', 'Заметка · важно'],
     ['STICKY', 'TODO · уточнить'], ['TEXT', 'Step2 · проверить'], ['STICKY', short + ' · уточнить у Андрея'],
     ['SHAPE_WITH_TEXT', orig.name], ['TEXT', short + ' · подпись'], ['TEXT', 'заголовок']].map(([t, n]) => human(sec, t, n));
   for (const n of mine) { n.x = -500; n.y = -500; n.text = {characters: 'своё', fontName: {family: 'Inter', style: 'Medium'}}; }
+  // копия стоит в секции раньше оригинала (человек поднял оригинал наверх или вынул его и вернул) — порядок ей не помогает
   const copy = human(sec, orig.type, orig.name); copy.spd = {...orig.spd}; copy.x = orig.x + 30; copy.y = orig.y + 30;
-  mine.push(copy);
-  // узел людей на месте и не тронут: та же секция, место, текст, без нашей метки
-  const alive = () => mine.every(n => n.parent === sec && (n === copy || (n.x === -500 && n.y === -500 && n.text.characters === 'своё' && !n.spd['tdtl_bpmn/key'])));
-  const origId = orig.getSharedPluginData('tdtl_bpmn', 'key').split('|')[0];
+  copy.text = {characters: 'Вариант Б', fontName: {family: 'Inter', style: 'Medium'}};
+  sec.children.splice(sec.children.indexOf(copy), 1); sec.children.unshift(copy);
+  const pasted = human(sec, 'SHAPE_WITH_TEXT', 'BRK-ASIS_X99 · Блок из «как есть»'); pasted.x = -800; pasted.y = -800;
+  pasted.spd = {'tdtl_bpmn/key': 'BRK-ASIS_X99|main', 'tdtl_bpmn/node': 'n777777'};
+  pasted.text = {characters: 'из другой секции', fontName: {family: 'Inter', style: 'Medium'}};
+  mine.push(copy, pasted);
+  // узел людей на месте и не тронут: та же секция, место, текст, метки
+  const look = (n) => JSON.stringify([n.parent && n.parent.id, n.x, n.y, n.text && n.text.characters, n.spd]);
+  const was = new Map(mine.map(n => [n, look(n)]));
+  const alive = () => mine.every(n => look(n) === was.get(n));
 
   const r2 = await run(again);
   ok(!r2.fresh && r2.created === 0 && r2.removed.length === 0 && r2.moved.length === 0, 'повтор без изменений: ' + JSON.stringify(r2));
   ok(alive() && sec.children.length === total + mine.length, 'свои узлы людей пропали');
-  ok(JSON.stringify(r2.dups) === JSON.stringify([origId]), 'в dups не только копия блока: ' + JSON.stringify(r2.dups));
+  ok(r2.dups.length === 0, 'копия или вставка названы нашими: ' + JSON.stringify(r2.dups));
+  ok(orig.parent === sec && orig.text.characters !== 'Вариант Б', 'оригинал блока потерян');
   const before = pos(sec);
 
   // человек растянул секцию и положил листочек за край схемы
@@ -113,8 +121,17 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   if (other) await fails(other, null, /Масштаб/, '--scale не остановил');
   // дальше масштаб совпадает: каждая остановка ниже срабатывает по своей причине, а не по масштабу
 
+  // часть 2 запущена с заголовком части 1 (скопировали команду): совпала меньше половины блоков — стоп, часть 1 цела
+  await fails(next, d => { for (const i of d.items) i.id = 'P2_' + i.id; for (const e of d.edges) Object.assign(e, {id: 'P2_' + e.id, s: 'P2_' + e.s, t: 'P2_' + e.t}); },
+    /другая схема/, 'часть 2 с тем же --title стёрла бы часть 1');
+
   // --section лежит на одной странице, --page — другая: стоп
   await fails(next, {sectionId: sec.id, page: 'Общий'}, /страниц/, '--section не на странице --page');
+
+  // копия нашей секции (Ctrl+D, те же метки) на другой странице — не наша: стоп
+  const secCopy = Object.assign(new N('SECTION'), {name: title, spd: {...sec.spd}}); common.appendChild(secCopy);
+  await fails(base, {page: 'Общий'}, /не этот скрипт/, 'копия секции принята за свою');
+  secCopy.remove();
 
   // чужая секция с тем же заголовком (нарисована руками, метки нет): стоп, ничего не тронуто
   const foreign = Object.assign(new N('SECTION'), {name: title}); common.appendChild(foreign);

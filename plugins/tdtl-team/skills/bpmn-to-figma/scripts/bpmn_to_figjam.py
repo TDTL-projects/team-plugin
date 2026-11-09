@@ -104,7 +104,7 @@ def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, 
     for e in m["edges"]:
         st = refs.get(e["id"])
         if st and st[0] in ids and st[1] in ids:
-            edges.append(prune(dict(id=e["id"], n=e["n"], k=e["k"], s=st[0], t=st[1],
+            edges.append(prune(dict(id=e["id"], n=e["n"], k=None if e["k"] == "sequenceFlow" else e["k"], s=st[0], t=st[1],   # вид по умолчанию не пишем: код короче
                                     ms=side(e["p"][0], B[st[0]]), me=side(e["p"][-1], B[st[1]]))))
     data = prune(dict(title=title, page=page, sectionId=section, S=S, ST=ST, force=force or None,
                       W=round(z(x1 - x0) + ST + 2 * P), H=round(max(i["y"] + i["h"] for i in items) + P),

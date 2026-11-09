@@ -7,6 +7,10 @@ const h = (c) => { let x = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c||'') ? c.slice
   return {r:parseInt(x.slice(0,2),16)/255,g:parseInt(x.slice(2,4),16)/255,b:parseInt(x.slice(4,6),16)/255}; };
 const R = {family:'Inter',style:'Regular'}, B = {family:'Inter',style:'Bold'}, M = {family:'Inter',style:'Medium'};
 const stop = (m) => { throw new Error(m + ' Ничего не изменено.'); };
+// Наш узел или секция — с меткой, которую поставил скрипт, и со своим же id в метке node. Копия (Ctrl+D) или вставка
+// из другой секции несёт метки оригинала, но id у неё новый — она уже не наша. Без node — узлы прежней версии скрипта.
+const ours = (n, k) => { if (!n.getSharedPluginData(NS, k)) return false; const id = n.getSharedPluginData(NS, 'node'); return !id || id === n.id; };
+const stamp = (n) => n.setSharedPluginData(NS, 'node', n.id);
 
 // 1. Страница и секция. Всё, что может остановить скрипт, — до первого изменения на доске.
 //    Коннектор начинает каждый вызов с первой страницы («Общий»), поэтому страницу называют явно (D-0026).
@@ -25,7 +29,7 @@ if (D.sectionId) {
   if (sec.type !== 'SECTION') stop('Узел ' + D.sectionId + ' — не секция.');
   let p = sec.parent; while (p && p.type !== 'PAGE') p = p.parent;
   if (page && p !== page) stop('Секция ' + D.sectionId + ' лежит на странице «' + (p && p.name) + '», а не на «' + page.name + '».');
-  if (!sec.getSharedPluginData(NS, 'scale')) stop('Секцию ' + D.sectionId + ' «' + sec.name + '» сделал не этот скрипт — её не трогаю.');
+  if (!ours(sec, 'scale')) stop('Секцию ' + D.sectionId + ' «' + sec.name + '» сделал не этот скрипт — её не трогаю.');
   if (sec.name !== D.title) stop('Секция ' + D.sectionId + ' называется «' + sec.name + '», а --title «' + D.title + '»: это другая схема или другая её часть. ' +
     'Проверьте --section (у каждой части схемы своя секция) или --title.');
   page = p;
@@ -37,7 +41,7 @@ if (!sec) {
   if (same.length > 1) stop('На странице «' + page.name + '» несколько секций «' + D.title + '»: укажите нужную через --section <id> (' + same.map(n => n.id).join(', ') + ').');
   sec = same[0] || null;
   // Секция с тем же заголовком, но без нашей метки, — чужая (D-0026: заголовки у всех одинаковые по форме).
-  if (sec && !sec.getSharedPluginData(NS, 'scale'))
+  if (sec && !ours(sec, 'scale'))
     stop('На странице «' + page.name + '» уже есть секция «' + D.title + '» (' + sec.id + '), но её сделал не этот скрипт — её не трогаю. ' +
       'Возьмите другой --title или пусть автор той секции её переименует.');
 }
@@ -50,9 +54,15 @@ if (!fresh) {
 
 // 2. Узлы прошлой выкладки — только с нашей меткой tdtl_bpmn/key. По имени слоя не узнаём: листочек «B03 · уточнить»
 //    выглядит как наш блок. Листочки, фигуры и тексты людей не трогаем; копию нашего блока (Ctrl+D, та же метка) — тоже.
-const keyOf = (n) => n.getSharedPluginData(NS, 'key') || null;
+const keyOf = (n) => ours(n, 'key') ? n.getSharedPluginData(NS, 'key') : null;
 const old = {}, dup = new Set();
 for (const n of (sec ? sec.children : [])) { const k = keyOf(n); if (!k) continue; if (old[k]) dup.add(k); else old[k] = n; }
+// Совпала меньше половины своих блоков — в секции другая схема или другая часть с тем же --title: перерисовка стёрла бы её.
+const want = new Set([...D.items.map(i => i.id + '|main'), ...D.edges.map(e => e.id + '|main')]);
+const mainOld = Object.keys(old).filter(k => k.endsWith('|main')), hit = mainOld.filter(k => want.has(k)).length;
+if (mainOld.length && hit * 2 < mainOld.length)
+  stop('В секции «' + sec.name + '» другая схема или другая её часть: из ' + mainOld.length + ' блоков и стрелок на доске в этой схеме ' + hit + '. ' +
+    'У каждой части схемы — свой --title.');
 // Шрифты — до первого изменения: человек мог поставить нашему блоку шрифт, которого нет, и скрипт упал бы посередине.
 const fonts = [R, B, M];
 for (const n of Object.values(old)) { const t = n.type === 'TEXT' ? n : n.text; if (t && t.fontName && t.fontName !== figma.mixed) fonts.push(t.fontName); }
@@ -61,7 +71,7 @@ catch (e) { stop('Не загружается шрифт на блоках сх�
 
 if (fresh) { sec = figma.createSection(); sec.x = 0; sec.y = page.children.reduce((m,n)=>n===sec?m:Math.max(m,n.y+n.height),-200) + 200;
   sec.fills = [{type:'SOLID', color:h('#ffffff')}]; }   // фон — только у новой: человек мог перекрасить свою
-sec.name = D.title; sec.setSharedPluginData(NS, 'scale', String(D.S));
+sec.name = D.title; sec.setSharedPluginData(NS, 'scale', String(D.S)); stamp(sec);
 
 // 3. Сдвиг всей схемы (bpmn.io двигает холст, другое окно --x0) гасим: блоки остаются там, где были.
 const cnt = {}; let matched = 0;
@@ -79,7 +89,7 @@ function get(key, make, type) {
   const n = old[key]; let node;
   if (n && n.type === type && !used.has(n.id)) { node = n; updated++; }
   else { node = make(); sec.appendChild(node); created++; }
-  used.add(node.id); node.setSharedPluginData(NS, 'key', key); return node;
+  used.add(node.id); node.setSharedPluginData(NS, 'key', key); stamp(node); return node;
 }
 const S1 = (c) => [{type:'SOLID', color:h(c)}];
 function txt(key, s, x, y, w, size, font, align) {
@@ -141,12 +151,13 @@ for (const e of D.edges) {
   c.connectorLineType = 'ELBOWED'; c.connectorStartStrokeCap = 'NONE';
   c.connectorEndStrokeCap = e.k==='association' ? 'NONE' : 'ARROW_EQUILATERAL';
   c.strokes = S1(e.k==='association'?'#9aa5b1':'#52606d'); c.strokeWeight = 1.5;
-  c.dashPattern = e.k==='sequenceFlow' ? [] : (e.k==='association' ? [2,4] : [8,5]);
+  c.dashPattern = !e.k ? [] : (e.k==='association' ? [2,4] : [8,5]);
   if (c.text.fontName !== figma.mixed) await figma.loadFontAsync(c.text.fontName);
   c.text.fontName = R; c.text.fontSize = 11; c.text.characters = e.n||'';
   c.name = e.id + ' · ' + (e.n||''); nc++;
 }
-// 4. Удаляем только свои узлы, которых больше нет в .bpmn. Узел, чья метка повторяется (копия), не трогаем — называем в dups.
+// 4. Удаляем только свои узлы, которых больше нет в .bpmn. Копии и вставки — не наши (ours), их не трогаем.
+//    Повтор метки бывает только у копий, сделанных до этой версии скрипта: не трогаем, называем в dups.
 const removed = [], dups = new Set();
 for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n); if (!k) continue;
   if (dup.has(k)) { dups.add(k.split('|')[0]); continue; }
