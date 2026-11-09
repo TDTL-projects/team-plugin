@@ -1,6 +1,6 @@
 // Проверка обновления схемы в FigJam на имитации Figma (без доски и без коннектора). Нужен Node.js.
 // Запуск: node test_bpmn_to_figjam.js база.js база_повтор.js новая_версия.js [другой_масштаб.js]
-//   база.js и новая_версия.js — выход bpmn_to_figjam.py с одним и тем же --title;
+//   база.js и новая_версия.js — выход bpmn_to_figjam.py с одним и тем же --title и --page "Наиль";
 //   другой_масштаб.js — та же схема с тем же --title и другим --scale (без --force): должна остановиться.
 const fs = require('fs');
 let nid = 0;
@@ -14,62 +14,114 @@ class N {
   remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; }
   findChild(f) { return this.children.find(f) || null; }
 }
-const page = new N('PAGE');
+// Две страницы, как на доске «Процессы»: первая — «Общий», черновики — на странице автора (D-0026).
+const pages = ['Общий', 'Наиль'].map(name => Object.assign(new N('PAGE'), {name}));
+const [common, author] = pages;
 const all = (n) => [n, ...n.children.flatMap(all)];
-const make = (type, extra) => { const n = new N(type); Object.assign(n, extra || {}); page.appendChild(n); return n; };
+const make = (type, extra) => { const n = new N(type); Object.assign(n, extra || {}); figma.currentPage.appendChild(n); return n; };
 const figma = {
-  mixed: Symbol('mixed'), currentPage: page,
+  mixed: Symbol('mixed'), currentPage: common, root: {children: pages},
+  setCurrentPageAsync: async (p) => { figma.currentPage = p; },
   loadFontAsync: async () => {},
-  getNodeByIdAsync: async (id) => all(page).find(n => n.id === id) || null,
+  getNodeByIdAsync: async (id) => pages.flatMap(all).find(n => n.id === id) || null,
   createSection: () => make('SECTION'), createText: () => make('TEXT'), createRectangle: () => make('RECTANGLE'),
   createShapeWithText: () => make('SHAPE_WITH_TEXT', {text: {fontName: {family: 'Inter', style: 'Medium'}}}),
   createConnector: () => make('CONNECTOR', {text: {fontName: {family: 'Inter', style: 'Medium'}}}),
 };
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const run = (file) => new AsyncFunction('figma', fs.readFileSync(file, 'utf8'))(figma);
+// patch — правка данных скрипта, как другие флаги bpmn_to_figjam.py: объект (undefined убирает поле) или функция
+const run = (file, patch) => {
+  let code = fs.readFileSync(file, 'utf8');
+  if (patch) {
+    const m = code.match(/^const D = (.*);$/m);
+    const d = JSON.parse(m[1]);
+    if (typeof patch === 'function') patch(d); else Object.assign(d, patch);
+    for (const k of Object.keys(d)) if (d[k] === undefined) delete d[k];
+    code = code.replace(m[0], () => 'const D = ' + JSON.stringify(d) + ';');
+  }
+  figma.currentPage = common;   // коннектор начинает каждый вызов с первой страницы
+  return new AsyncFunction('figma', code)(figma);
+};
 const ok = (c, msg) => { if (!c) { console.error('ОШИБКА: ' + msg); process.exit(1); } };
-const pos = (sec) => Object.fromEntries(sec.children.filter(n => n.getSharedPluginData('tdtl_bpmn', 'key').endsWith('|main'))
+const board = () => JSON.stringify(pages.flatMap(all).map(n => [n.id, n.name, n.x, n.y, n.fills, n.parent && n.parent.id, n.spd]));
+const fails = async (file, patch, re, msg) => {
+  const snap = board();
+  let err = null; try { await run(file, patch); } catch (e) { err = e.message; }
+  ok(err && re.test(err), msg + ': ' + err);
+  ok(snap === board(), msg + ': доска изменилась');
+};
+let mine = [];   // узлы, которые добавили люди (в том числе копия нашего блока с той же меткой)
+const pos = (sec) => Object.fromEntries(sec.children.filter(n => !mine.includes(n) && n.getSharedPluginData('tdtl_bpmn', 'key').endsWith('|main'))
   .map(n => [n.getSharedPluginData('tdtl_bpmn', 'key').replace(/^.*?_/, ''), [Math.round(n.x), Math.round(n.y)]]));
+const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.appendChild(n); return n; };
 
 (async () => {
   const [base, again, next, other] = process.argv.slice(2);
+  const title = JSON.parse(fs.readFileSync(base, 'utf8').match(/^const D = (.*);$/m)[1]).title;
+
+  // страница не указана или не найдена — стоп до любых изменений
+  await fails(base, {page: undefined, sectionId: undefined}, /--page/, 'без --page и --section не остановил');
+  await fails(base, {page: 'Нет такой'}, /Нет страницы/, 'неизвестная страница не остановила');
+  await fails(base, {sectionId: 'n999999'}, /не найдена/, 'несуществующая --section не остановила');
+
   const r1 = await run(base);
   ok(r1.fresh && r1.created > 0 && r1.removed.length === 0, 'первый перенос: ' + JSON.stringify(r1));
-  const sec = page.children.find(n => n.type === 'SECTION');
+  ok(!common.children.length, 'секция легла на первую страницу, а не на страницу автора');
+  const sec = author.children.find(n => n.type === 'SECTION');
+  ok(sec, 'секции нет на странице автора');
   const total = sec.children.length;
-  // люди добавили своё: листочек, фигуру, текст с « · »
-  for (const [t, name] of [['STICKY', 'Sticky'], ['SHAPE_WITH_TEXT', 'Мой блок'], ['TEXT', 'Заметка · важно']]) { const n = new N(t); n.name = name; sec.appendChild(n); }
+  // люди добавили своё: листочки (в том числе латиницей «слово · …»), фигуру, текст с « · », копию блока (Ctrl+D)
+  mine = [['STICKY', 'Sticky'], ['SHAPE_WITH_TEXT', 'Мой блок'], ['TEXT', 'Заметка · важно'],
+    ['STICKY', 'TODO · уточнить'], ['TEXT', 'Step2 · проверить']].map(([t, n]) => human(sec, t, n));
+  const orig = sec.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n.getSharedPluginData('tdtl_bpmn', 'key'));
+  const copy = human(sec, orig.type, orig.name); copy.spd = {...orig.spd}; copy.x = orig.x + 30; copy.y = orig.y + 30;
+  mine.push(copy);
+  const alive = () => mine.every(n => n.parent === sec);
+  const origId = orig.getSharedPluginData('tdtl_bpmn', 'key').split('|')[0];
 
   const r2 = await run(again);
   ok(!r2.fresh && r2.created === 0 && r2.removed.length === 0 && r2.moved.length === 0, 'повтор без изменений: ' + JSON.stringify(r2));
-  ok(sec.children.length === total + 3, 'свои узлы людей пропали');
+  ok(alive() && sec.children.length === total + mine.length, 'свои узлы людей пропали');
+  ok(r2.dups && r2.dups.includes(origId), 'копия блока не названа в dups: ' + JSON.stringify(r2.dups));
 
-  // старая выкладка без меток (как у Даниила до правки): узнаётся по именам слоёв
+  // старая выкладка без меток (как у Даниила до правки): узнаётся по именам слоёв, но только по id из схемы
   const before = pos(sec);
   for (const n of sec.children) n.spd = {};
   sec.setSharedPluginData('tdtl_bpmn', 'scale', '1.5');
   const r3 = await run(again);
   ok(r3.created === 0 && r3.removed.length === 0, 'старая выкладка не узнана: ' + JSON.stringify(r3));
+  ok(alive(), 'при узнавании по именам удалены узлы людей');
 
-  const r4 = await run(next);
+  sec.fills = [{type: 'SOLID', color: {r: 0.9, g: 0.95, b: 1}}];
+  const fill = JSON.stringify(sec.fills);
+  // цвет из .bpmn не в виде #rrggbb не роняет обновление посередине
+  const r4 = await run(next, d => { const t = d.items.find(i => i.t !== 'lane'); t.fill = 'red'; t.stroke = '#fff'; });
   const after = pos(sec);
   const shifted = Object.keys(before).filter(k => k in after && (before[k][0] !== after[k][0] || before[k][1] !== after[k][1]));
   ok(shifted.length === r4.moved.length, 'список сдвинутых не совпадает с доской: ' + shifted.length + ' / ' + r4.moved.length);
-  ok(sec.children.some(n => n.type === 'STICKY'), 'листочек удалён при обновлении');
+  ok(alive(), 'листочек или копия блока удалены при обновлении');
+  ok(JSON.stringify(sec.fills) === fill, 'фон секции перекрашен при обновлении');
 
   // другой масштаб: стоп без изменений
   sec.setSharedPluginData('tdtl_bpmn', 'scale', '1');
-  const snap = JSON.stringify(pos(sec)), cnt = sec.children.length;
-  let err = null; try { await run(next); } catch (e) { err = e.message; }
-  ok(err && /Масштаб/.test(err) && cnt === sec.children.length && snap === JSON.stringify(pos(sec)), 'другой масштаб не остановил: ' + err);
+  await fails(next, null, /Масштаб/, 'другой масштаб не остановил');
 
   // код, собранный с другим --scale, на секции с прежним масштабом: стоп без изменений
   if (other) {
     sec.setSharedPluginData('tdtl_bpmn', 'scale', fs.readFileSync(next, 'utf8').match(/"S":([\d.]+)/)[1]);
-    const snap2 = JSON.stringify(pos(sec)), cnt2 = sec.children.length;
-    let err2 = null; try { await run(other); } catch (e) { err2 = e.message; }
-    ok(err2 && /Масштаб/.test(err2) && cnt2 === sec.children.length && snap2 === JSON.stringify(pos(sec)), '--scale не остановил: ' + err2);
+    await fails(other, null, /Масштаб/, '--scale не остановил');
   }
+
+  // --section лежит на одной странице, --page — другая: стоп
+  await fails(next, {sectionId: sec.id, page: 'Общий'}, /страниц/, '--section не на странице --page');
+
+  // чужая секция с тем же заголовком (нарисована руками, метки нет): стоп, ничего не тронуто
+  const foreign = Object.assign(new N('SECTION'), {name: title}); common.appendChild(foreign);
+  const theirs = [human(foreign, 'STICKY', 'TODO · уточнить'), human(foreign, 'SHAPE_WITH_TEXT', 'Шаг 1')];
+  await fails(base, {page: 'Общий'}, /--section/, 'чужая секция с тем же заголовком принята за свою');
+  // человек сам указал эту секцию через --section: скрипт рисует в ней, своё людей не трогает
+  const r5 = await run(base, {page: undefined, sectionId: foreign.id});
+  ok(r5.created > 0 && theirs.every(n => n.parent === foreign), 'в указанной секции удалены узлы людей: ' + JSON.stringify(r5));
 
   console.log('все проверки прошли | первый перенос: ' + r1.created + ' узлов | новая версия: создано ' + r4.created +
     ', удалено ' + r4.removed.length + ', сдвиг холста погашен ' + JSON.stringify(r4.shift) + ', сдвинуто блоков ' + r4.moved.length +

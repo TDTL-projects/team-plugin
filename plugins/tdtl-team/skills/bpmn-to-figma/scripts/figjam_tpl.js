@@ -1,35 +1,72 @@
 // Строит или обновляет схему BPMN в FigJam. Данные подставляет bpmn_to_figjam.py; код не править.
 const D = __DATA__;
 const NS = 'tdtl_bpmn';
-const h = (hex) => { hex = (hex||'#ffffff').replace('#',''); return {r:parseInt(hex.slice(0,2),16)/255,g:parseInt(hex.slice(2,4),16)/255,b:parseInt(hex.slice(4,6),16)/255}; };
+// Цвет — только #rrggbb или #rgb, иначе цвет по умолчанию: битое значение не роняет обновление посередине.
+const h = (c) => { let x = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c||'') ? c.slice(1) : 'ffffff';
+  if (x.length === 3) x = x.replace(/./g, '$&$&');
+  return {r:parseInt(x.slice(0,2),16)/255,g:parseInt(x.slice(2,4),16)/255,b:parseInt(x.slice(4,6),16)/255}; };
 const R = {family:'Inter',style:'Regular'}, B = {family:'Inter',style:'Bold'}, M = {family:'Inter',style:'Medium'};
-await Promise.all([figma.loadFontAsync(R), figma.loadFontAsync(B), figma.loadFontAsync(M)]);
+const stop = (m) => { throw new Error(m + ' Ничего не изменено.'); };
 
-// 1. Секция: по id, иначе по заголовку. Масштаб другой, чем в прошлый раз, — стоп до любых изменений.
-let sec = D.sectionId ? await figma.getNodeByIdAsync(D.sectionId) : null;
-if (sec && sec.type !== 'SECTION') throw new Error('Узел ' + D.sectionId + ' — не секция');
-if (!sec) sec = figma.currentPage.findChild(n => n.type === 'SECTION' && n.name === D.title);
+// 1. Страница и секция. Всё, что может остановить скрипт, — до первого изменения на доске.
+//    Коннектор начинает каждый вызов с первой страницы («Общий»), поэтому страницу называют явно (D-0026).
+let page = null;
+if (D.page) {
+  const ps = figma.root.children.filter(p => p.id === D.page);
+  const byName = ps.length ? ps : figma.root.children.filter(p => p.name === D.page);
+  if (byName.length !== 1) stop((byName.length ? 'Страниц с названием «' + D.page + '» несколько — укажите id страницы.' : 'Нет страницы «' + D.page + '».') +
+    ' Страницы: ' + figma.root.children.map(p => '«' + p.name + '» (' + p.id + ')').join(', ') + '.');
+  page = byName[0];
+}
+let sec = null;
+if (D.sectionId) {
+  sec = await figma.getNodeByIdAsync(D.sectionId);
+  if (!sec) stop('Секция ' + D.sectionId + ' не найдена.');
+  if (sec.type !== 'SECTION') stop('Узел ' + D.sectionId + ' — не секция.');
+  let p = sec.parent; while (p && p.type !== 'PAGE') p = p.parent;
+  if (page && p !== page) stop('Секция ' + D.sectionId + ' лежит на странице «' + (p && p.name) + '», а не на «' + page.name + '».');
+  page = p;
+}
+if (!page) stop('Не указано, куда класть схему: --page «название страницы» (черновик — на странице автора, D-0026) или --section <id> из прошлого ответа.');
+if (figma.currentPage !== page) await figma.setCurrentPageAsync(page);
+if (!sec) {
+  const same = page.children.filter(n => n.type === 'SECTION' && n.name === D.title);
+  if (same.length > 1) stop('На странице «' + page.name + '» несколько секций «' + D.title + '»: укажите нужную через --section <id> (' + same.map(n => n.id).join(', ') + ').');
+  sec = same[0] || null;
+  // Секция с тем же заголовком, но без нашей метки, — чужая (D-0026: заголовки у всех одинаковые по форме).
+  if (sec && !sec.getSharedPluginData(NS, 'scale'))
+    stop('На странице «' + page.name + '» уже есть секция «' + D.title + '» (' + sec.id + '), но её нарисовал не этот скрипт. ' +
+      'Если это прошлый перенос этой схемы — укажите --section ' + sec.id + ', иначе возьмите другой --title.');
+}
 const fresh = !sec;
 if (!fresh) {
   const prev = sec.getSharedPluginData(NS, 'scale');
   if (prev && Number(prev) !== D.S && !D.force)
-    throw new Error('Масштаб схемы в секции ' + prev + ', а сейчас ' + D.S + ': все блоки сдвинутся, комментарии останутся на старых местах. Ничего не изменено.');
+    stop('Масштаб схемы в секции ' + prev + ', а сейчас ' + D.S + ': все блоки сдвинутся, комментарии останутся на старых местах.');
 }
-if (fresh) { sec = figma.createSection(); sec.x = 0; sec.y = figma.currentPage.children.reduce((m,n)=>n===sec?m:Math.max(m,n.y+n.height),-200) + 200; }
-sec.name = D.title; sec.setSharedPluginData(NS, 'scale', String(D.S)); sec.fills = [{type:'SOLID', color:h('#ffffff')}];
+await Promise.all([figma.loadFontAsync(R), figma.loadFontAsync(B), figma.loadFontAsync(M)]);
+if (fresh) { sec = figma.createSection(); sec.x = 0; sec.y = page.children.reduce((m,n)=>n===sec?m:Math.max(m,n.y+n.height),-200) + 200;
+  sec.fills = [{type:'SOLID', color:h('#ffffff')}]; }   // фон — только у новой: человек мог перекрасить свою
+sec.name = D.title; sec.setSharedPluginData(NS, 'scale', String(D.S));
 
-// 2. Узлы прошлой выкладки. Наш узел — с меткой tdtl_bpmn/key или (старые выкладки) с именем «id · …».
-//    Листочки, фигуры и тексты, которые люди добавили сами, не трогаем.
+// 2. Узлы прошлой выкладки. Наш узел — с меткой tdtl_bpmn/key. Старые выкладки без меток узнаются по имени
+//    «id · …», но только если такой id есть в схеме: листочек «TODO · уточнить» — не наш.
+//    Листочки, фигуры и тексты, которые люди добавили сами, не трогаем; копию нашего блока (Ctrl+D, та же метка) — тоже.
+const norm = (key) => { if (key === 'title') return key; const q = key.split('|'); return (D.pfx && q[0].startsWith(D.pfx) ? q[0].slice(D.pfx.length) : q[0]) + '|' + q[1]; };
+const known = new Set(['title']);
+for (const i of D.items) for (const p of ['main','подпись','полоса']) known.add(norm(i.id + '|' + p));
+for (const e of D.edges) known.add(norm(e.id + '|main'));
 const ID_RE = /^[A-Za-z_][\w.\-]* · /;
 const keyOf = (n) => {
   const k = n.getSharedPluginData(NS, 'key'); if (k) return k;
   if (n.name === 'заголовок') return 'title';
   if (!ID_RE.test(n.name)) return null;
   const p = n.name.split(' · '); const l = p[p.length-1];
-  return p[0] + '|' + (p.length > 1 && (l === 'подпись' || l === 'полоса') ? l : 'main');
+  const key = p[0] + '|' + (p.length > 1 && (l === 'подпись' || l === 'полоса') ? l : 'main');
+  return known.has(norm(key)) ? key : null;
 };
-const norm = (key) => { if (key === 'title') return key; const q = key.split('|'); return (D.pfx && q[0].startsWith(D.pfx) ? q[0].slice(D.pfx.length) : q[0]) + '|' + q[1]; };
-const old = {}; for (const n of sec.children) { const k = keyOf(n); if (k) old[norm(k)] = n; }
+const old = {}, dup = new Set();
+for (const n of sec.children) { const k = keyOf(n); if (!k) continue; const q = norm(k); if (old[q]) dup.add(q); else old[q] = n; }
 
 // 3. Сдвиг всей схемы (bpmn.io двигает холст, другое окно --x0) гасим: блоки остаются там, где были.
 const cnt = {}; let matched = 0;
@@ -113,8 +150,9 @@ for (const e of D.edges) {
   c.text.fontName = R; c.text.fontSize = 11; c.text.characters = e.n||'';
   c.name = e.id + ' · ' + (e.n||''); nc++;
 }
-// 4. Удаляем только свои узлы, которых больше нет в .bpmn.
-const removed = [];
+// 4. Удаляем только свои узлы, которых больше нет в .bpmn. Узел, чья метка повторяется (копия), не трогаем — называем в dups.
+const removed = [], dups = new Set();
 for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n); if (!k) continue;
+  if (dup.has(norm(k))) { dups.add(k.split('|')[0]); continue; }
   if (k.endsWith('|main')) removed.push(k.split('|')[0]); n.remove(); }
-return {section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved};
+return {page: page.name, section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved, dups: [...dups]};

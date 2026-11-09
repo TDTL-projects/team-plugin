@@ -3,6 +3,7 @@
 """
 import math
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 
@@ -38,10 +39,17 @@ def bounds(el):
     return [r(b.get("x")), r(b.get("y")), r(b.get("width")), r(b.get("height"))]
 
 
+HEX = re.compile(r"#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
+
+
 def color(el, which):
+    """Цвет как #rrggbb (#rgb разворачивается). Другое (red, rgb(...), мусор) — нет цвета: рисуется цвет по умолчанию,
+    а в SVG и код для FigJam не попадает ничего, кроме шестнадцатеричных цифр."""
     for attr in COLOR_ATTRS[which]:
-        if el.get(attr):
-            return el.get(attr)
+        m = HEX.fullmatch((el.get(attr) or "").strip())
+        if m:
+            h = m.group(1)
+            return "#" + (h if len(h) == 6 else "".join(c * 2 for c in h)).lower()
     return None
 
 
@@ -134,6 +142,9 @@ def parse(path):
             if c:
                 item["stroke"] = c
             edges.append(item)
+
+    if not shapes:
+        sys.exit("В чертеже нет ни одной фигуры с координатами — рисовать нечего")
 
     # 3. Общие границы
     xs, ys = [], []

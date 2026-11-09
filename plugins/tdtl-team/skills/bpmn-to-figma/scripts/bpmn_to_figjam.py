@@ -2,12 +2,13 @@
 или обновляет уже перенесённую на месте, по id элементов. Основа — скрипт Даниила (T-0142, 05.11.2026).
 
 Запуск (ставить ничего не нужно):
-  python3 bpmn_to_figjam.py схема.bpmn out.js --title "XP Название · как будет" [--groups ID1,ID2 | --x0 N --x1 N] [--section ID] [--scale 1.5] [--force]
+  python3 bpmn_to_figjam.py схема.bpmn out.js --title "XP Название · как будет" (--page "Наиль" | --section ID) [--groups ID1,ID2 | --x0 N --x1 N] [--scale 1.5] [--force]
   python3 bpmn_to_figjam.py схема.bpmn --list-groups      # этапы (группы) схемы, чтобы переносить частями
 
 Код из out.js передают в use_figma без правок. Он:
 - рисует фигуры по координатам файла (x1.5), стрелки — коннекторами FigJam, они тянутся за блоками;
-- находит секцию по --section или по заголовку и обновляет её: есть в .bpmn — правит узел на месте,
+- кладёт схему на страницу --page (коннектор иначе начинает с первой — «Общий»), находит секцию по --section
+  или по заголовку на этой странице и обновляет её (секцию с тем же заголовком, нарисованную не скриптом, не трогает): есть в .bpmn — правит узел на месте,
   нет на доске — создаёт, пропал из .bpmn — удаляет; листочки и фигуры, которые люди добавили сами, не трогает;
 - сдвиг всей схемы на холсте (как у bpmn.io) гасит, чтобы блоки и комментарии рядом с ними остались на местах;
 - возвращает, какие блоки сдвинулись и какие удалены: комментарии FigJam привязаны к точке холста, не к блоку.
@@ -34,7 +35,10 @@ def groups_of(m):
     return [s for s in m["shapes"] if s["k"] == "group"]
 
 
-def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, scale=S):
+def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, scale=S, page=None):
+    if not page and not section:
+        raise SystemExit("Укажите, куда класть схему: --page \"название страницы\" (черновик — на странице автора, D-0026) "
+                         "или --section <id> из прошлого ответа")
     if not scale > 0:
         raise SystemExit("--scale должен быть больше нуля")
     S = scale
@@ -55,10 +59,10 @@ def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, 
     y0 = min(s["b"][1] for s in pools)
 
     def xy(x, y):
-        return round((x - x0) * S + P + ST, 1), round((y - y0) * S + T, 1)
+        return round((x - x0) * S + P + ST), round((y - y0) * S + T)   # целые px: на доске разница < 1 px, а код короче
 
     def z(v):
-        return round(v * S, 1)
+        return round(v * S)
 
     refs = {}
     for el in ET.parse(src).getroot().iter():
@@ -83,6 +87,8 @@ def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, 
             it["lx"], it["ly"] = xy(s["lb"][0], s["lb"][1])
             it["lw"] = z(s["lb"][2])
         items.append(prune(it))
+    if not any(i.get("t") != "lane" for i in items):
+        raise SystemExit("В выбранном окне схемы нет ни одного блока — переносить нечего (проверьте --groups или --x0/--x1)")
 
     def side(pt, b):
         x, y, w, h = b
@@ -100,11 +106,14 @@ def build(src, title, x0=None, x1=None, groups=None, section=None, force=False, 
     ids_all = [i["id"] for i in items]
     pfx = os.path.commonprefix(ids_all)
     pfx = pfx[:pfx.rfind("_") + 1]   # общий префикс id (BRK-TOBE_): узлы старой выкладки без него тоже узнаются
-    data = prune(dict(title=title, sectionId=section, S=S, pfx=pfx, ST=ST, force=force or None,
+    data = prune(dict(title=title, page=page, sectionId=section, S=S, pfx=pfx, ST=ST, force=force or None,
                       W=round(z(x1 - x0) + ST + 2 * P), H=round(max(i["y"] + i["h"] for i in items) + P),
                       items=items, edges=edges))
     with open(os.path.join(HERE, "figjam_tpl.js"), encoding="utf-8") as f:
-        js = f.read().replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        tpl = f.read()
+    # строки-комментарии и отступы коннектору не нужны, а место в пределе длины занимают
+    tpl = "\n".join(l.strip() for l in tpl.splitlines() if l.strip() and not l.strip().startswith("//"))
+    js = tpl.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
     shapes = sum(1 for i in items if i.get("t") != "lane")
     return js, shapes, sum(1 for i in items if i.get("t") == "lane"), len(edges)
 
@@ -117,7 +126,8 @@ def main():
     ap.add_argument("--groups", help="id групп-этапов через запятую: перенести только их")
     ap.add_argument("--x0", type=float)
     ap.add_argument("--x1", type=float)
-    ap.add_argument("--section", help="id секции на доске (без него ищется по заголовку)")
+    ap.add_argument("--page", help="страница доски (название или id), куда класть схему; черновик — на странице автора")
+    ap.add_argument("--section", help="id секции на доске (без него ищется по заголовку на странице --page)")
     ap.add_argument("--scale", type=float, default=S,
                     help="масштаб схемы (по умолчанию %s); другой масштаб на уже перенесённой секции — стоп без --force" % S)
     ap.add_argument("--force", action="store_true", help="разрешить другой масштаб, чем в прошлый раз")
@@ -130,7 +140,7 @@ def main():
     if not a.out or not a.title:
         ap.error("нужны out.js и --title")
     js, shapes, lanes, edges = build(a.src, a.title, a.x0, a.x1,
-                                     a.groups.split(",") if a.groups else None, a.section, a.force, a.scale)
+                                     a.groups.split(",") if a.groups else None, a.section, a.force, a.scale, a.page)
     if len(js) > LIMIT:
         print("Код длиннее, чем принимает коннектор: %d из %d символов. Переносите по частям — по этапам:\n"
               "  --groups ID1,ID2 (список: --list-groups), у каждой части свой --title." % (len(js), LIMIT))
