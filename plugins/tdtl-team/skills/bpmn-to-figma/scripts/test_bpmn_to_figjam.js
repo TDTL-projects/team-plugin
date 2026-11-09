@@ -82,8 +82,11 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   const copy = human(sec, orig.type, orig.name); copy.spd = {...orig.spd}; copy.x = orig.x + 30; copy.y = orig.y + 30;
   copy.text = {characters: 'Вариант Б', fontName: {family: 'Inter', style: 'Medium'}};
   sec.children.splice(sec.children.indexOf(copy), 1); sec.children.unshift(copy);
-  const pasted = human(sec, 'SHAPE_WITH_TEXT', 'BRK-ASIS_X99 · Блок из «как есть»'); pasted.x = -800; pasted.y = -800;
-  pasted.spd = {'tdtl_bpmn/key': 'BRK-ASIS_X99|main', 'tdtl_bpmn/node': 'n777777'};
+  // блок вставлен из другой секции, где лежит его оригинал
+  const elsewhere = Object.assign(new N('SECTION'), {name: 'Другая схема · как есть'}); author.appendChild(elsewhere);
+  const src = human(elsewhere, 'SHAPE_WITH_TEXT', 'BRK-ASIS_X99 · Блок из «как есть»');
+  src.spd = {'tdtl_bpmn/key': 'BRK-ASIS_X99|main', 'tdtl_bpmn/node': src.id};
+  const pasted = human(sec, 'SHAPE_WITH_TEXT', src.name); pasted.x = -800; pasted.y = -800; pasted.spd = {...src.spd};
   pasted.text = {characters: 'из другой секции', fontName: {family: 'Inter', style: 'Medium'}};
   mine.push(copy, pasted);
   // узел людей на месте и не тронут: та же секция, место, текст, метки
@@ -162,6 +165,31 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
 
   // схема перенесена частями, у каждой своя секция: --section от другой части — стоп, а не перерисовка чужой части
   await fails(next, d => { d.sectionId = sec.id; delete d.page; d.title = title + ' · этап 06'; }, /называется/, '--section от другой части не остановил');
+
+  // вырезали и вставили (Ctrl+X → Ctrl+V): у блока и у секции новые id, метки прежние, оригиналов больше нет.
+  // Так схему переносят на «Общий» — секция должна обновляться как своя, без второй копии и без стопа.
+  const blk = sec.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n !== orig && !mine.includes(n) && n.spd['tdtl_bpmn/node'] === n.id);
+  const blk2 = Object.assign(new N(blk.type), {name: blk.name, x: blk.x, y: blk.y, text: blk.text, spd: {...blk.spd}});
+  blk.remove(); sec.appendChild(blk2);
+  // а этот блок вырезан вместе с копией: у двух узлов метки одного пропавшего блока, различить их нельзя
+  const blk3 = sec.children.find(n => n.type === 'SHAPE_WITH_TEXT' && n !== orig && n !== blk2 && !mine.includes(n) && n.spd['tdtl_bpmn/node'] === n.id);
+  const twins = [0, 1].map(d => Object.assign(new N(blk3.type), {name: blk3.name, x: blk3.x + d * 40, y: blk3.y, text: blk3.text, spd: {...blk3.spd}}));
+  const blk3Id = blk3.spd['tdtl_bpmn/key'].split('|')[0];
+  blk3.remove(); for (const n of twins) sec.appendChild(n);
+  const moved = Object.assign(new N('SECTION'), {name: sec.name, spd: {...sec.spd}, width: sec.width, height: sec.height, fills: sec.fills});
+  for (const n of [...sec.children]) moved.appendChild(n);
+  sec.remove(); common.appendChild(moved);
+  // блок вставлен из другого файла: оригинала в этом файле нет, ключа в схеме нет — не удаляем, называем в unknown
+  const foreignFile = human(moved, 'SHAPE_WITH_TEXT', 'OTHER_Z1 · Блок из другого файла');
+  foreignFile.spd = {'tdtl_bpmn/key': 'OTHER_Z1|main', 'tdtl_bpmn/node': 'n888888'};
+  const count = moved.children.length;
+  const r6 = await run(next, {page: undefined, sectionId: moved.id});
+  ok(r6.created === 0 && r6.removed.length === 0, 'вырезанная и вставленная секция не обновилась на месте: ' + JSON.stringify(r6));
+  ok(moved.children.length === count && blk2.parent === moved && blk2.spd['tdtl_bpmn/node'] === blk2.id && moved.spd['tdtl_bpmn/node'] === moved.id,
+    'вырезанный блок или секция не стали своими');
+  ok(mine.every(n => n.parent === moved) && pasted.text.characters === 'из другой секции', 'при переносе тронуты узлы людей');
+  ok(foreignFile.parent === moved && r6.unknown.includes('OTHER_Z1'), 'вставка из другого файла удалена или не названа в unknown: ' + JSON.stringify(r6.unknown));
+  ok(JSON.stringify(r6.dups) === JSON.stringify([blk3Id]) && twins.every(n => n.parent === moved), 'копия, вырезанная вместе с оригиналом, не названа в dups или удалена: ' + JSON.stringify(r6.dups));
 
   console.log('все проверки прошли | первый перенос: ' + r1.created + ' узлов | новая версия: создано ' + r4.created +
     ', удалено ' + r4.removed.length + ', сдвиг холста погашен ' + JSON.stringify(r4.shift) + ', сдвинуто блоков ' + r4.moved.length +
