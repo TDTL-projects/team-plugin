@@ -1,0 +1,120 @@
+// Строит или обновляет схему BPMN в FigJam. Данные подставляет bpmn_to_figjam.py; код не править.
+const D = __DATA__;
+const NS = 'tdtl_bpmn';
+const h = (hex) => { hex = (hex||'#ffffff').replace('#',''); return {r:parseInt(hex.slice(0,2),16)/255,g:parseInt(hex.slice(2,4),16)/255,b:parseInt(hex.slice(4,6),16)/255}; };
+const R = {family:'Inter',style:'Regular'}, B = {family:'Inter',style:'Bold'}, M = {family:'Inter',style:'Medium'};
+await Promise.all([figma.loadFontAsync(R), figma.loadFontAsync(B), figma.loadFontAsync(M)]);
+
+// 1. Секция: по id, иначе по заголовку. Масштаб другой, чем в прошлый раз, — стоп до любых изменений.
+let sec = D.sectionId ? await figma.getNodeByIdAsync(D.sectionId) : null;
+if (sec && sec.type !== 'SECTION') throw new Error('Узел ' + D.sectionId + ' — не секция');
+if (!sec) sec = figma.currentPage.findChild(n => n.type === 'SECTION' && n.name === D.title);
+const fresh = !sec;
+if (!fresh) {
+  const prev = sec.getSharedPluginData(NS, 'scale');
+  if (prev && Number(prev) !== D.S && !D.force)
+    throw new Error('Масштаб схемы в секции ' + prev + ', а сейчас ' + D.S + ': все блоки сдвинутся, комментарии останутся на старых местах. Ничего не изменено.');
+}
+if (fresh) { sec = figma.createSection(); sec.x = 0; sec.y = figma.currentPage.children.reduce((m,n)=>n===sec?m:Math.max(m,n.y+n.height),-200) + 200; }
+sec.name = D.title; sec.setSharedPluginData(NS, 'scale', String(D.S)); sec.fills = [{type:'SOLID', color:h('#ffffff')}];
+
+// 2. Узлы прошлой выкладки. Наш узел — с меткой tdtl_bpmn/key или (старые выкладки) с именем «id · …».
+//    Листочки, фигуры и тексты, которые люди добавили сами, не трогаем.
+const ID_RE = /^[A-Za-z_][\w.\-]* · /;
+const keyOf = (n) => {
+  const k = n.getSharedPluginData(NS, 'key'); if (k) return k;
+  if (n.name === 'заголовок') return 'title';
+  if (!ID_RE.test(n.name)) return null;
+  const p = n.name.split(' · '); const l = p[p.length-1];
+  return p[0] + '|' + (p.length > 1 && (l === 'подпись' || l === 'полоса') ? l : 'main');
+};
+const norm = (key) => { if (key === 'title') return key; const q = key.split('|'); return (D.pfx && q[0].startsWith(D.pfx) ? q[0].slice(D.pfx.length) : q[0]) + '|' + q[1]; };
+const old = {}; for (const n of sec.children) { const k = keyOf(n); if (k) old[norm(k)] = n; }
+
+// 3. Сдвиг всей схемы (bpmn.io двигает холст, другое окно --x0) гасим: блоки остаются там, где были.
+const cnt = {}; let matched = 0;
+for (const i of D.items) { if (i.t === 'lane') continue; const n = old[norm(i.id+'|main')]; if (!n) continue;
+  matched++; const k = Math.round(n.x - i.x) + ',' + Math.round(n.y - i.y); cnt[k] = (cnt[k]||0) + 1; }
+let dx = 0, dy = 0; const best = Object.entries(cnt).sort((a,b) => b[1]-a[1])[0];
+if (best && best[1]*2 > matched && best[0] !== '0,0') [dx, dy] = best[0].split(',').map(Number);
+for (const i of D.items) { if (i.t !== 'lane') { i.x += dx; if (i.lx != null) i.lx += dx; } i.y += dy; if (i.ly != null) i.ly += dy; }
+const W = Math.max(D.W, ...D.items.map(i => i.x + i.w + 40)), H = Math.max(D.H, ...D.items.map(i => i.y + i.h + 40));
+sec.resizeWithoutConstraints(W, H);
+
+const used = new Set(); let created = 0, updated = 0; const moved = [];
+function get(key, make, type) {
+  const n = old[norm(key)]; let node;
+  if (n && n.type === type && !used.has(n.id)) { node = n; updated++; }
+  else { node = make(); sec.appendChild(node); created++; }
+  used.add(node.id); node.setSharedPluginData(NS, 'key', key); return node;
+}
+const S1 = (c) => [{type:'SOLID', color:h(c)}];
+function txt(key, s, x, y, w, size, font, align) {
+  const t = get(key, () => figma.createText(), 'TEXT'); t.rotation = 0;
+  t.fontName = font||R; t.fontSize = size||11; t.characters = s||''; t.textAlignHorizontal = align||'CENTER';
+  if (w) { t.textAutoResize = 'HEIGHT'; t.resize(Math.max(w,20), t.height); } else t.textAutoResize = 'WIDTH_AND_HEIGHT';
+  t.x = x; t.y = y; return t;
+}
+const place = (n, i) => { const was = old[norm(i.id+'|main')] === n ? [n.x, n.y] : null;
+  n.x = i.x; n.y = i.y; if (was && (Math.abs(was[0]-n.x) > 2 || Math.abs(was[1]-n.y) > 2)) moved.push(i.id); };
+
+const title = txt('title', D.title, 40, 30, 0, 48, B, 'LEFT'); title.name = 'заголовок';
+const map = {}; const TASK = ['task','userTask','serviceTask','manualTask','scriptTask','businessRuleTask','sendTask','receiveTask','callActivity','subProcess'];
+const EVI = {message:'✉', timer:'⏱', signal:'△', conditional:'≡', escalation:'↑', error:'ϟ'};
+const GWI = {exclusiveGateway:'✕', parallelGateway:'+', inclusiveGateway:'○', eventBasedGateway:'⬠', complexGateway:'✱'};
+for (const i of D.items) {
+  const nm = i.id + ' · ' + (i.n||'').replace(/\n/g,' ');
+  if (i.t === 'lane' || i.k === 'group') {
+    const lane = i.t === 'lane';
+    const r = get(i.id+'|main', () => figma.createRectangle(), 'RECTANGLE'); r.resize(i.w, i.h); r.fills = [];
+    if (lane) { r.x = i.x; r.y = i.y; } else place(r, i);
+    r.strokes = S1(lane?'#9aa5b1':'#7b8794'); r.strokeWeight = lane?1:1.5; r.dashPattern = lane ? [] : [8,6]; r.name = nm; r.locked = true;
+    if (lane) {
+      const st = get(i.id+'|полоса', () => figma.createRectangle(), 'RECTANGLE'); st.resize(D.ST, i.h); st.x = i.x; st.y = i.y;
+      st.fills = S1('#eef1f5'); st.strokes = S1('#9aa5b1'); st.strokeWeight = 1; st.name = i.id + ' · полоса'; st.locked = true;
+      const l = txt(i.id+'|подпись', i.n, 0, 0, Math.max(i.h-16, 40), 14, B, 'CENTER');
+      l.rotation = 90; l.x = i.x + (D.ST - l.height)/2; l.y = i.y + i.h - 8;   // снизу вверх, как в BPMN
+      l.name = nm + ' · подпись'; l.locked = true;
+    } else {
+      const l = txt(i.id+'|подпись', i.n, i.x + 8, i.y + 6, i.w - 16, 14, B, 'LEFT'); l.name = nm + ' · подпись'; l.locked = true;
+    }
+    continue;
+  }
+  const s = get(i.id+'|main', () => figma.createShapeWithText(), 'SHAPE_WITH_TEXT');
+  if (s.text.fontName !== figma.mixed) await figma.loadFontAsync(s.text.fontName);
+  const gw = /Gateway$/.test(i.k);
+  if (i.k === 'textAnnotation') {
+    s.shapeType = 'SQUARE'; s.resize(i.w, i.h);
+    s.fills = S1(/^\s*Ответ/.test(i.n||'')?'#d3f9d8':(/^\s*Вопрос/.test(i.n||'')?'#fff3bf':'#f5f7fa')); s.strokes = S1('#b3b3b3'); s.strokeWeight = 1;
+    s.text.fontName = R; s.text.fontSize = 11; s.text.characters = i.n||''; s.text.textAlignHorizontal = 'LEFT';
+  } else if (TASK.includes(i.k)) {
+    s.shapeType = 'ROUNDED_RECTANGLE'; s.resize(i.w, i.h);
+    s.fills = S1(i.fill||'#ffffff'); s.strokes = S1(i.stroke||'#1e1e1e'); s.strokeWeight = i.k==='callActivity' ? 3 : 1;
+    s.text.fontName = R; s.text.fontSize = 11; s.text.textAlignHorizontal = 'CENTER';
+    s.text.characters = (i.k==='userTask'?'👤 ':i.k==='serviceTask'?'⚙ ':i.k==='callActivity'?'⊞ ':'') + (i.n||'');
+  } else {
+    s.shapeType = gw ? 'DIAMOND' : 'ELLIPSE'; s.resize(i.w, i.h);
+    s.fills = S1(i.fill||'#ffffff'); s.strokes = S1(i.stroke||'#1e1e1e'); s.strokeWeight = i.k==='endEvent' ? 4 : 1.5;
+    s.text.fontName = M; s.text.fontSize = gw?20:14; s.text.textAlignHorizontal = 'CENTER'; s.text.characters = gw ? (GWI[i.k]||'') : (EVI[i.ev]||'');
+    if (i.n) { const l = txt(i.id+'|подпись', i.n, (i.lx!=null?i.lx:i.x-45), (i.ly!=null?i.ly:i.y+i.h+4), i.lw||i.w+90, 11, R); l.name = i.id + ' · подпись'; }
+  }
+  place(s, i); s.name = nm; map[i.id] = s;
+}
+let nc = 0;
+for (const e of D.edges) {
+  const a = map[e.s], b = map[e.t]; if (!a || !b) continue;
+  const c = get(e.id+'|main', () => figma.createConnector(), 'CONNECTOR');
+  c.connectorStart = {endpointNodeId:a.id, magnet:e.ms}; c.connectorEnd = {endpointNodeId:b.id, magnet:e.me};
+  c.connectorLineType = 'ELBOWED'; c.connectorStartStrokeCap = 'NONE';
+  c.connectorEndStrokeCap = e.k==='association' ? 'NONE' : 'ARROW_EQUILATERAL';
+  c.strokes = S1(e.k==='association'?'#9aa5b1':'#52606d'); c.strokeWeight = 1.5;
+  c.dashPattern = e.k==='sequenceFlow' ? [] : (e.k==='association' ? [2,4] : [8,5]);
+  if (c.text.fontName !== figma.mixed) await figma.loadFontAsync(c.text.fontName);
+  c.text.fontName = R; c.text.fontSize = 11; c.text.characters = e.n||'';
+  c.name = e.id + ' · ' + (e.n||''); nc++;
+}
+// 4. Удаляем только свои узлы, которых больше нет в .bpmn.
+const removed = [];
+for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n); if (!k) continue;
+  if (k.endsWith('|main')) removed.push(k.split('|')[0]); n.remove(); }
+return {section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved};
