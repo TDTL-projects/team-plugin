@@ -96,6 +96,19 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   ok(alive() && sec.children.length === total + mine.length, 'свои узлы людей пропали');
   ok(r2.dups.length === 0, 'копия или вставка названы нашими: ' + JSON.stringify(r2.dups));
   ok(orig.parent === sec && orig.text.characters !== 'Вариант Б', 'оригинал блока потерян');
+
+  // секция прежней версии скрипта (метки node ещё нет) и вставленный туда до обновления блок из другой секции:
+  // ключа нет в этой схеме — не удаляем, называем в unknown; свои узлы при этом получают метку node
+  for (const n of [sec, ...sec.children]) if (!mine.includes(n)) delete n.spd['tdtl_bpmn/node'];
+  const legacyPaste = human(sec, 'SHAPE_WITH_TEXT', 'BRK-ASIS_Y01 · Блок из «как есть»'); legacyPaste.x = -900; legacyPaste.y = -900;
+  legacyPaste.spd = {'tdtl_bpmn/key': 'BRK-ASIS_Y01|main'}; legacyPaste.text = {characters: 'старая вставка', fontName: {family: 'Inter', style: 'Medium'}};
+  const lp = look(legacyPaste);
+  const r3 = await run(again);
+  ok(r3.created === 0 && r3.removed.length === 0 && look(legacyPaste) === lp, 'на секции прежней версии вставка удалена или тронута: ' + JSON.stringify(r3));
+  ok(JSON.stringify(r3.unknown) === '["BRK-ASIS_Y01"]', 'вставка без метки node не названа в unknown: ' + JSON.stringify(r3.unknown));
+  ok(sec.children.every(n => n === legacyPaste || mine.includes(n) || n.spd['tdtl_bpmn/node'] === n.id), 'свои узлы прежней версии не получили метку node');
+  ok(alive(), 'на секции прежней версии тронуты узлы людей');
+
   const before = pos(sec);
 
   // человек растянул секцию и положил листочек за край схемы
@@ -121,8 +134,14 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   if (other) await fails(other, null, /Масштаб/, '--scale не остановил');
   // дальше масштаб совпадает: каждая остановка ниже срабатывает по своей причине, а не по масштабу
 
-  // часть 2 запущена с заголовком части 1 (скопировали команду): совпала меньше половины блоков — стоп, часть 1 цела
-  await fails(next, d => { for (const i of d.items) i.id = 'P2_' + i.id; for (const e of d.edges) Object.assign(e, {id: 'P2_' + e.id, s: 'P2_' + e.s, t: 'P2_' + e.t}); },
+  // часть 2 запущена с заголовком части 1 (скопировали команду): стоп, часть 1 цела. Как в настоящем --groups,
+  // дорожки у частей общие (те же id), блоков в маленькой части меньше, чем дорожек.
+  const part = title + ' · малая часть';
+  const rp = await run(base, d => { d.title = part; const keep = new Set(d.items.filter(i => i.t !== 'lane').slice(0, 4).map(i => i.id));
+    d.items = d.items.filter(i => i.t === 'lane' || keep.has(i.id)); d.edges = d.edges.filter(e => keep.has(e.s) && keep.has(e.t)); });
+  ok(rp.fresh, 'малая часть не легла новой секцией: ' + JSON.stringify(rp));
+  await fails(next, d => { d.title = part; for (const i of d.items) if (i.t !== 'lane') i.id = 'P2_' + i.id;
+    for (const e of d.edges) Object.assign(e, {id: 'P2_' + e.id, s: 'P2_' + e.s, t: 'P2_' + e.t}); },
     /другая схема/, 'часть 2 с тем же --title стёрла бы часть 1');
 
   // --section лежит на одной странице, --page — другая: стоп

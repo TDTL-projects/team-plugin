@@ -57,9 +57,11 @@ if (!fresh) {
 const keyOf = (n) => ours(n, 'key') ? n.getSharedPluginData(NS, 'key') : null;
 const old = {}, dup = new Set();
 for (const n of (sec ? sec.children : [])) { const k = keyOf(n); if (!k) continue; if (old[k]) dup.add(k); else old[k] = n; }
-// Совпала меньше половины своих блоков — в секции другая схема или другая часть с тем же --title: перерисовка стёрла бы её.
+// Совпала меньше половины своих блоков и стрелок — в секции другая схема или другая часть с тем же --title: перерисовка стёрла бы её.
+// Дорожки не считаем: они есть в каждой части схемы с теми же id.
+const lanes = new Set(D.items.filter(i => i.t === 'lane').map(i => i.id + '|main'));
 const want = new Set([...D.items.map(i => i.id + '|main'), ...D.edges.map(e => e.id + '|main')]);
-const mainOld = Object.keys(old).filter(k => k.endsWith('|main')), hit = mainOld.filter(k => want.has(k)).length;
+const mainOld = Object.keys(old).filter(k => k.endsWith('|main') && !lanes.has(k)), hit = mainOld.filter(k => want.has(k)).length;
 if (mainOld.length && hit * 2 < mainOld.length)
   stop('В секции «' + sec.name + '» другая схема или другая её часть: из ' + mainOld.length + ' блоков и стрелок на доске в этой схеме ' + hit + '. ' +
     'У каждой части схемы — свой --title.');
@@ -158,8 +160,11 @@ for (const e of D.edges) {
 }
 // 4. Удаляем только свои узлы, которых больше нет в .bpmn. Копии и вставки — не наши (ours), их не трогаем.
 //    Повтор метки бывает только у копий, сделанных до этой версии скрипта: не трогаем, называем в dups.
-const removed = [], dups = new Set();
+//    Узел прежней версии (без метки node), чьего ключа нет в схеме, может быть вставкой из другой секции: не трогаем, называем в unknown.
+const all = new Set(['title', ...want]); for (const i of D.items) for (const p of ['подпись','полоса']) all.add(i.id + '|' + p);
+const removed = [], dups = new Set(), unknown = new Set();
 for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n); if (!k) continue;
   if (dup.has(k)) { dups.add(k.split('|')[0]); continue; }
+  if (!n.getSharedPluginData(NS, 'node') && !all.has(k)) { unknown.add(k.split('|')[0]); continue; }
   if (k.endsWith('|main')) removed.push(k.split('|')[0]); n.remove(); }
-return {page: page.name, section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved, dups: [...dups]};
+return {page: page.name, section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved, dups: [...dups], unknown: [...unknown]};
