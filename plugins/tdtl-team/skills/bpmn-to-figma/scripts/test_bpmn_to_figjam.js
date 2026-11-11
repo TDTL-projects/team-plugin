@@ -2,6 +2,8 @@
 // Запуск: node test_bpmn_to_figjam.js база.js база_повтор.js новая_версия.js [другой_масштаб.js]
 //   база.js и новая_версия.js — выход bpmn_to_figjam.py с одним и тем же --title и --page "Наиль";
 //   другой_масштаб.js — та же схема с тем же --title и другим --scale (без --force): должна остановиться.
+// Проверки T-0220 (метка gone на весь документ) делят новую_версию.js на две части по ширине схемы — в ней нужны
+// хотя бы два блока-задачи в левой половине; каждый файл из аргументов — не длиннее 49 000 знаков.
 const fs = require('fs');
 let nid = 0;
 class N {
@@ -15,13 +17,16 @@ class N {
   findChild(f) { return this.children.find(f) || null; }
 }
 // Две страницы, как на доске «Процессы»: первая — «Общий», черновики — на странице автора (D-0026).
-const pages = ['Общий', 'Наиль'].map(name => Object.assign(new N('PAGE'), {name}));
+// Документ — со своими метками (getSharedPluginData на весь файл, T-0220); страницы грузятся сразу, loadAsync ничего не делает.
+const pages = ['Общий', 'Наиль'].map(name => Object.assign(new N('PAGE'), {name, loadAsync: async () => {}}));
 const [common, author] = pages;
+const root = Object.assign(new N('DOCUMENT'), {id: '0:0', name: 'Процессы', children: pages});
+for (const p of pages) p.parent = root;
 const all = (n) => [n, ...n.children.flatMap(all)];
 const make = (type, extra) => { const n = new N(type); Object.assign(n, extra || {}); figma.currentPage.appendChild(n); return n; };
 const figma = {
-  mixed: Symbol('mixed'), currentPage: common, root: {children: pages},
-  setCurrentPageAsync: async (p) => { figma.currentPage = p; },
+  mixed: Symbol('mixed'), currentPage: common, root,
+  setCurrentPageAsync: async (p) => { figma.currentPage = p; }, loadAllPagesAsync: async () => {},
   loadFontAsync: async () => {},
   getNodeByIdAsync: async (id) => pages.flatMap(all).find(n => n.id === id) || null,
   createSection: () => make('SECTION'), createText: () => make('TEXT'), createRectangle: () => make('RECTANGLE'),
@@ -43,7 +48,7 @@ const run = (file, patch) => {
   return new AsyncFunction('figma', code)(figma);
 };
 const ok = (c, msg) => { if (!c) { console.error('ОШИБКА: ' + msg); process.exit(1); } };
-const board = () => JSON.stringify(pages.flatMap(all).map(n => [n.id, n.name, n.x, n.y, n.fills, n.parent && n.parent.id, n.spd]));
+const board = () => JSON.stringify([root.spd, ...pages.flatMap(all).map(n => [n.id, n.name, n.x, n.y, n.fills, n.parent && n.parent.id, n.spd])]);
 const fails = async (file, patch, re, msg) => {
   const snap = board();
   let err = null; try { await run(file, patch); } catch (e) { err = e.message; }
@@ -59,6 +64,9 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
 (async () => {
   const [base, again, next, other] = process.argv.slice(2);
   const title = JSON.parse(fs.readFileSync(base, 'utf8').match(/^const D = (.*);$/m)[1]).title;
+  // T-0220 AC-6: код влезает в предел коннектора с запасом (bpmn_to_figjam.py, LIMIT) — считаем знаки, как Python
+  for (const f of process.argv.slice(2)) { const len = Array.from(fs.readFileSync(f, 'utf8')).length;
+    ok(len <= 49000, 'T-0220 AC-6: код ' + f + ' длиннее 49 000 знаков: ' + len); }
 
   // страница не указана или не найдена — стоп до любых изменений
   await fails(base, {page: undefined, sectionId: undefined}, /--page/, 'без --page и --section не остановил');
@@ -222,6 +230,76 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   ok(legacyCopy.parent === moved && legacyCopy.x === lsrcX + 50 && legacyCopy.text.characters === 'копия прежней версии' && r6.dups.includes(lcId),
     'копию прежней версии обновили вместо вырезанного оригинала: ' + JSON.stringify([legacyCopy.x, legacyCopy.text.characters, r6.dups]));
   ok(r6.dups.includes(blk3Id) && twins.every(n => n.parent === moved), 'копия, вырезанная вместе с оригиналом, не названа в dups или удалена: ' + JSON.stringify(r6.dups));
+
+  // T-0220. Схема разложена на две секции (две части с разными --title, как «· этапы 01–02» и «· этапы 03–05»).
+  // Андрей скопировал (Ctrl+D) блок из первой секции во вторую и вписал свой вариант. Блок убрали из схемы — скрипт
+  // удалил оригинал в первой секции. Потом блок вернули в схему второй части: обновление второй секции не должна
+  // принять копию за вырезанный блок. Второй блок удалила из первой секции прежняя версия скрипта (до выкатки новой):
+  // его id лежит только в метке gone первой секции (через запятую), а следующей новая версия обновляет вторую секцию.
+  const NS = 'tdtl_bpmn';
+  const DN = JSON.parse(fs.readFileSync(next, 'utf8').match(/^const D = (.*);$/m)[1]);
+  const cx = (i) => i.x + i.w / 2, body = DN.items.filter(i => i.t !== 'lane');
+  const mid = (Math.min(...body.map(cx)) + Math.max(...body.map(cx))) / 2;
+  const ids1 = new Set(body.filter(i => cx(i) < mid).map(i => i.id)), ids2 = new Set(body.filter(i => cx(i) >= mid).map(i => i.id));
+  const [b0, b1] = body.filter(i => ids1.has(i.id) && /Task$|^task$|^callActivity$/.test(i.k)).map(i => i.id);
+  ok(b0 && b1 && ids2.size, 'T-0220: в новой версии схемы нет двух блоков-задач в левой половине — сценарий не собрать');
+  const T1 = title + ' · часть 1', T2 = title + ' · часть 2';
+  const slice = (t, ids) => (d) => { d.title = t; d.items = d.items.filter(i => i.t === 'lane' || ids.has(i.id));
+    d.edges = d.edges.filter(e => ids.has(e.s) && ids.has(e.t)); };
+  ok((await run(next, slice(T1, ids1))).fresh && (await run(next, slice(T2, ids2))).fresh, 'T-0220: части схемы не легли новыми секциями');
+  const sec1 = author.children.find(n => n.type === 'SECTION' && n.name === T1), sec2 = author.children.find(n => n.type === 'SECTION' && n.name === T2);
+  const own = (s, id) => s.children.find(n => n.spd[NS + '/key'] === id + '|main' && n.spd[NS + '/node'] === n.id);
+  const o0 = own(sec1, b0), o1 = own(sec1, b1);
+  // копия: новый узел с метками оригинала (и с его id в node), в другой секции, на другом месте, со своим текстом
+  const dupe = (o, text, x, y) => { const c = Object.assign(new N(o.type), {name: o.name, x, y, spd: {...o.spd},
+    text: {characters: text, fontName: {family: 'Inter', style: 'Medium'}}}); sec2.appendChild(c); return c; };
+  const c0 = dupe(o0, 'Вариант Андрея', 111, 222), c1 = dupe(o1, 'Вариант Андрея 2', 333, 444);
+  const c0was = look(c0), c1was = look(c1);
+  // первый блок убрали из первой части: обновление первой секции удаляет его оригинал
+  const q1 = await run(next, slice(T1, new Set([...ids1].filter(id => id !== b0))));
+  ok(q1.removed.includes(b0) && !o0.parent && look(c0) === c0was && look(c1) === c1was,
+    'T-0220: обновление первой секции не удалило оригинал или тронуло копии: ' + JSON.stringify(q1.removed));
+  // второй блок убрала из схемы и удалила из первой секции прежняя версия скрипта: id — только в метке gone секции
+  const lg = sec1.getSharedPluginData(NS, 'gone'); o1.remove(); sec1.setSharedPluginData(NS, 'gone', (lg ? lg + ',' : '') + o1.id);
+  const token = (s, id) => new RegExp('(^|[^\\w:])' + id.replace(/[^\w]/g, '\\$&') + '($|[^\\w:])').test(s);
+  ok(token(root.getSharedPluginData(NS, 'gone'), o0.id),
+    'T-0220 AC-1: id удалённого скриптом узла ' + o0.id + ' нет в метке gone документа: «' + root.getSharedPluginData(NS, 'gone') + '»');
+  // блоки вернули в схему — во вторую часть
+  const q2 = await run(next, slice(T2, new Set([...ids2, b0, b1])));
+  const named = [...q2.dups, ...q2.unknown];
+  ok(look(c0) === c0was && named.includes(b0), 'T-0220 AC-2: копию в другой секции затёрли или не назвали в dups/unknown, когда блок вернули в схему: ' +
+    JSON.stringify([c0.parent && c0.parent.name, c0.x, c0.y, c0.text.characters, q2.dups, q2.unknown]));
+  ok(own(sec2, b0) && own(sec2, b0) !== c0, 'T-0220 AC-2: вернувшийся блок не нарисован во второй секции заново');
+  ok(look(c1) === c1was && named.includes(b1), 'T-0220 AC-1: метка gone, записанная в первой секции прежней версией, не учтена — копию затёрли или не назвали: ' +
+    JSON.stringify([c1.parent && c1.parent.name, c1.x, c1.y, c1.text.characters, q2.dups, q2.unknown]));
+  // На «Общем» секция части лежит внутри секции направления (путь --section). Прежняя версия удалила блок и записала
+  // его id в метку gone этой вложенной секции; в той же секции — Ctrl+D-копия блока. Запуск с --section не должен
+  // принять копию за вырезанный блок.
+  const T4 = title + ' · вложенная', dir = Object.assign(new N('SECTION'), {name: 'Направление'}); common.appendChild(dir);
+  ok((await run(next, slice(T4, ids1))).fresh, 'T-0220: секция для вложенной проверки не легла новой');
+  const s4 = author.children.find(n => n.type === 'SECTION' && n.name === T4); dir.appendChild(s4);
+  const o4 = own(s4, b1);
+  const c4 = Object.assign(new N(o4.type), {name: o4.name, x: 5, y: 6, spd: {...o4.spd},
+    text: {characters: 'Копия человека', fontName: {family: 'Inter', style: 'Medium'}}}); s4.appendChild(c4);
+  const lg4 = s4.getSharedPluginData(NS, 'gone'); o4.remove(); s4.setSharedPluginData(NS, 'gone', (lg4 ? lg4 + ',' : '') + o4.id);
+  const c4was = look(c4);
+  const q4 = await run(next, d => { slice(T4, ids1)(d); d.sectionId = s4.id; delete d.page; });
+  ok(look(c4) === c4was && [...q4.dups, ...q4.unknown].includes(b1),
+    'T-0220 AC-1: метка gone прежней версии во вложенной секции (--section на «Общем») не учтена — копию затёрли или не назвали: ' +
+    JSON.stringify([c4.parent && c4.parent.name, c4.x, c4.y, c4.text.characters, q4.dups, q4.unknown]));
+
+  // T-0220 AC-3: gone загружен до check(sec). Скрипт сам секций не удаляет — состояние искусственное: id исходной секции
+  // лежит в её метке gone, секцию скопировали (Ctrl+D, метки те же), исходную удалили. Если gone загружен до проверки
+  // секции, копия — не наша (её оригинал удалил «скрипт»): стоп. Если позже — копия сочтена вырезанной и обновлена.
+  const T3 = title + ' · копия секции', small = new Set([...ids2].slice(0, 4));
+  ok((await run(next, slice(T3, small))).fresh, 'T-0220: секция для проверки AC-3 не легла новой');
+  const sA = author.children.find(n => n.type === 'SECTION' && n.name === T3);
+  const sB = Object.assign(new N('SECTION'), {name: T3, x: sA.x, y: sA.y + sA.height + 200, width: sA.width, height: sA.height, fills: sA.fills,
+    spd: {...sA.spd, [NS + '/gone']: (sA.spd[NS + '/gone'] ? sA.spd[NS + '/gone'] + ',' : '') + sA.id}});
+  for (const n of sA.children) sB.appendChild(Object.assign(new N(n.type), {name: n.name, x: n.x, y: n.y, text: n.text && {...n.text}, spd: {...n.spd}}));
+  sA.remove(); author.appendChild(sB);
+  await fails(next, d => { slice(T3, small)(d); d.sectionId = sB.id; delete d.page; }, /не этот скрипт/,
+    'T-0220 AC-3: метка gone загружена после проверки секции — копия секции, чей оригинал в gone, принята за свою');
 
   console.log('все проверки прошли | первый перенос: ' + r1.created + ' узлов | новая версия: создано ' + r4.created +
     ', удалено ' + r4.removed.length + ', сдвиг холста погашен ' + JSON.stringify(r4.shift) + ', сдвинуто блоков ' + r4.moved.length +

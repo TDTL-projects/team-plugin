@@ -11,8 +11,12 @@ const stop = (m) => { throw new Error(m + ' Ничего не изменено.'
 // из другой секции несёт метки оригинала, но id у неё новый: пока оригинал на доске, она не наша. Оригинала больше нет —
 // узел вырезали и вставили (Ctrl+X → Ctrl+V, перенос схемы на «Общий»): он наш. Без node — узлы прежней версии скрипта.
 // Оригинал мог пропасть и потому, что его удалил сам скрипт (блок убрали из схемы): копия такого блока — не вырезанный блок.
-// Поэтому id удалённых скриптом узлов хранятся в секции (метка gone).
-const cut = new Set(); let gone = new Set();
+// Поэтому id удалённых скриптом узлов хранятся в метке gone документа: копия могла уйти в секцию другой части схемы (T-0220).
+// Прежняя версия писала gone в свою секцию — такие метки наших секций страницы тоже читаем, до первой проверки узлов.
+// Секции обходим вглубь: на «Общем» схема лежит внутри секции своего направления.
+const cut = new Set(), G = (n) => n.getSharedPluginData(NS, 'gone').split(',').filter(Boolean);
+const gone = new Set(G(figma.root));
+const legacy = (n) => { for (const c of n.children) if (c.type === 'SECTION') { if (c.getSharedPluginData(NS, 'scale')) G(c).forEach(i => gone.add(i)); legacy(c); } };
 const check = async (n) => { const id = n.getSharedPluginData(NS, 'node'); if (id && id !== n.id && !gone.has(id) && !(await figma.getNodeByIdAsync(id))) cut.add(n.id); };
 const ours = (n, k) => { if (!n.getSharedPluginData(NS, k)) return false; const id = n.getSharedPluginData(NS, 'node'); return !id || id === n.id || cut.has(n.id); };
 const stamp = (n) => n.setSharedPluginData(NS, 'node', n.id);
@@ -34,6 +38,7 @@ if (D.sectionId) {
   if (sec.type !== 'SECTION') stop('Узел ' + D.sectionId + ' — не секция.');
   let p = sec.parent; while (p && p.type !== 'PAGE') p = p.parent;
   if (page && p !== page) stop('Секция ' + D.sectionId + ' лежит на странице «' + (p && p.name) + '», а не на «' + page.name + '».');
+  if (p) { await p.loadAsync(); legacy(p); }   // коннектор стоит на первой странице: другую до обхода подгружаем
   await check(sec);
   if (!ours(sec, 'scale')) stop('Секцию ' + D.sectionId + ' «' + sec.name + '» сделал не этот скрипт — её не трогаю.');
   if (sec.name !== D.title) stop('Секция ' + D.sectionId + ' называется «' + sec.name + '», а --title «' + D.title + '»: это другая схема или другая её часть. ' +
@@ -43,6 +48,7 @@ if (D.sectionId) {
 if (!page) stop('Не указано, куда класть схему: --page «название страницы» (черновик — на странице автора, D-0026) или --section <id> из прошлого ответа.');
 if (figma.currentPage !== page) await figma.setCurrentPageAsync(page);
 if (!sec) {
+  legacy(page);
   const same = page.children.filter(n => n.type === 'SECTION' && n.name === D.title);
   if (same.length > 1) stop('На странице «' + page.name + '» несколько секций «' + D.title + '»: укажите нужную через --section <id> (' + same.map(n => n.id).join(', ') + ').');
   sec = same[0] || null;
@@ -61,7 +67,6 @@ if (!fresh) {
 
 // 2. Узлы прошлой выкладки — только с нашей меткой tdtl_bpmn/key. По имени слоя не узнаём: листочек «B03 · уточнить»
 //    выглядит как наш блок. Листочки, фигуры и тексты людей не трогаем; копию нашего блока (Ctrl+D, та же метка) — тоже.
-gone = new Set((sec ? sec.getSharedPluginData(NS, 'gone') : '').split(',').filter(Boolean));
 for (const n of (sec ? sec.children : [])) if (n.getSharedPluginData(NS, 'key')) await check(n);
 const keyOf = (n) => ours(n, 'key') ? n.getSharedPluginData(NS, 'key') : null;
 const old = {}, dup = new Set();
@@ -177,8 +182,11 @@ for (const e of D.edges) {
 //    двойника после вырезки, блок прежней версии, убранный из схемы. С ключом из схемы — в dups, без него — в unknown.
 const all = new Set(['title', ...want]); for (const i of D.items) for (const p of ['подпись','полоса']) all.add(i.id + '|' + p);
 const removed = [], dups = new Set(), unknown = new Set();
-for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n); if (!k) continue;
+// Копию блока, удалённого скриптом раньше, не трогаем. Её ключ снова в схеме (блок нарисован заново на своём месте) — называем
+// в dups; ключа в схеме нет — молчим, как о копиях живых блоков: иначе людям предложат удалить их правку.
+for (const n of [...sec.children]) { if (used.has(n.id)) continue; const k = keyOf(n);
+  if (!k) { const c = n.getSharedPluginData(NS, 'key'); if (all.has(c) && gone.has(n.getSharedPluginData(NS, 'node'))) dups.add(c.split('|')[0]); continue; }
   if (rank(n) !== 0 || dup.has(k)) { (all.has(k) ? dups : unknown).add(k.split('|')[0]); continue; }
   if (k.endsWith('|main')) removed.push(k.split('|')[0]); gone.add(n.id); n.remove(); }
-sec.setSharedPluginData(NS, 'gone', [...gone].slice(-3000).join(','));   // последние 3000 — с запасом под предел метки
+figma.root.setSharedPluginData(NS, 'gone', [...gone].slice(-3000).join(','));   // последние 3000 — с запасом под предел метки
 return {page: page.name, section: sec.id, fresh, shift: [dx, dy], shapes: Object.keys(map).length, connectors: nc, created, updated, removed, moved, dups: [...dups], unknown: [...unknown]};
