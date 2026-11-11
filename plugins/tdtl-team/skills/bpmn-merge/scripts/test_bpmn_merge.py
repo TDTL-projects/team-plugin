@@ -657,12 +657,159 @@ def ac1_hardlink(d):
     ok(not errs, "T-0196 AC-1: " + "; ".join(errs))
 
 
+# ---------------------------------------------------------------- T-0196, второй круг ревью PR
+
+TASKS_AB = '<bpmn:task id="A" name="А"/><bpmn:task id="B" name="Б"/>'
+
+
+def lanes_doc(lanes, tasks=TASKS_AB):
+    """Маленькая схема без чертежа: процесс с дорожками и блоками."""
+    return (HEAD + '<bpmn:process id="P"><bpmn:laneSet id="LS">' + lanes + '</bpmn:laneSet>' + tasks
+            + '</bpmn:process></bpmn:definitions>')
+
+
+def ln(i, *ids, name=None):
+    return '<bpmn:lane id="%s" name="%s">%s</bpmn:lane>' % (i, name or "Дорожка " + i, fr(*ids))
+
+
+def ac6_lane_deleted(d):
+    """G. Автор удалил дорожку L, а её блоки А и Б перенёс в M (в исходной M пустая).
+    --accept B: Б только в M. --accept A,B,L: L удалена, А и Б только в M. Без --accept — как в исходной."""
+    base = write(d, "base.bpmn", lanes_doc(ln("L", "A", "B") + ln("M")))
+    v = write(d, "v.bpmn", lanes_doc(ln("M", "A", "B")))
+    errs = []
+    r = bm.merge(base, [v], ["Андрей"], accept=[])
+    m = r["merged"]
+    if not ("A" in r["changes"] and "B" in r["changes"] and "L" in r["deletions"]):
+        errs.append("сломан сценарий: changes %s, deletions %s" % (sorted(r["changes"]), sorted(r["deletions"])))
+    if "L" not in m.by_id or lanes_with(m, "A") != {"L"} or lanes_with(m, "B") != {"L"}:
+        errs.append("без --accept: L %s, А в %s, Б в %s, ждали как в исходной (оба в L)"
+                    % ("есть" if "L" in m.by_id else "нет", sorted(lanes_with(m, "A")), sorted(lanes_with(m, "B"))))
+    r = bm.merge(base, [v], ["Андрей"], accept=["B"])
+    m = r["merged"]
+    if lanes_with(m, "B") != {"M"}:
+        errs.append("--accept B: Б в %s, ждали только M (дорожки L у автора нет — ссылка из неё должна уйти)"
+                    % sorted(lanes_with(m, "B")))
+    if lanes_with(m, "A") != {"L"}:
+        errs.append("--accept B: А в %s, ждали L (А не принимали)" % sorted(lanes_with(m, "A")))
+    if r["failed"] or dup_refs(m) or r["problems"]:
+        errs.append("--accept B: «Не получилось» %s, повторы %s, проблемы %s" % (r["failed"], dup_refs(m), r["problems"]))
+    r = bm.merge(base, [v], ["Андрей"], accept=["A", "B", "L"])
+    m = r["merged"]
+    if "L" in m.by_id:
+        errs.append("--accept A,B,L: дорожка L не удалена; «Не получилось» %s" % r["failed"])
+    if lanes_with(m, "A") != {"M"} or lanes_with(m, "B") != {"M"}:
+        errs.append("--accept A,B,L: А в %s, Б в %s, ждали оба только в M"
+                    % (sorted(lanes_with(m, "A")), sorted(lanes_with(m, "B"))))
+    if r["failed"] or dup_refs(m) or r["problems"]:
+        errs.append("--accept A,B,L: «Не получилось» %s, повторы %s, проблемы %s" % (r["failed"], dup_refs(m), r["problems"]))
+    ok(not errs, "T-0196 AC-6: автор удалил дорожку — " + "; ".join(errs))
+
+
+def ac6_lane_conflict(d):
+    """H. Дорожка под конфликтом: X добавил дорожку L2 «X-lane», Y — свою L2 «Y-lane», перенёс в неё Б и переименовал Б.
+    --accept B не применяет правку Б вовсе (ни имя, ни дорожку): Б в «Не получилось», Б остаётся в L. Развилка 10."""
+    base = write(d, "base.bpmn", lanes_doc(ln("L", "A", "B")))
+    vx = write(d, "vx.bpmn", lanes_doc(ln("L", "A", "B") + ln("L2", name="X-lane")))
+    vy = write(d, "vy.bpmn", lanes_doc(ln("L", "A") + ln("L2", "B", name="Y-lane"),
+                                       '<bpmn:task id="A" name="А"/><bpmn:task id="B" name="Б от Y"/>'))
+    errs = []
+    for title, files, authors in (("X первым", [vx, vy], ["X", "Y"]), ("Y первым", [vy, vx], ["Y", "X"])):
+        r = bm.merge(base, files, authors, accept=["B"])
+        m = r["merged"]
+        if not any(c[0] == "L2" for c in r["conflicts"]) or "B" not in r["changes"]:
+            errs.append("%s: сломан сценарий — нет конфликта по L2 или правки Б" % title)
+            continue
+        if m.by_id["B"].get("name") != "Б":
+            errs.append("%s: имя Б «%s» — правка применена, хотя дорожка L2 под конфликтом" % (title, m.by_id["B"].get("name")))
+        if lanes_with(m, "B") != {"L"}:
+            errs.append("%s: Б в %s, ждали L" % (title, sorted(lanes_with(m, "B"))))
+        if "B" in refs(m.by_id["L2"], "flowNodeRef"):
+            errs.append("%s: ссылка на Б записана в спорную дорожку L2" % title)
+        if "B" not in {f[1] for f in r["failed"]}:
+            errs.append("%s: Б не в «Не получилось»" % title)
+        if "B" in {a[0] for a in r["applied"]}:
+            errs.append("%s: Б в «Принято»: %s" % (title, r["applied"]))
+        if dup_refs(m) or r["problems"]:
+            errs.append("%s: повторы %s, проблемы %s" % (title, dup_refs(m), r["problems"]))
+    ok(not errs, "T-0196 AC-6: дорожка под конфликтом — " + "; ".join(errs))
+
+
+def ac6_same_block(d):
+    """I. Два автора добавили одинаковый новый блок C и положили в разные дорожки: один — в L, другой — в новую N.
+    C остаётся в дорожке первого автора, новая дорожка второго приходит без ссылки на C. Развилка 13."""
+    tasks = TASKS_AB + '<bpmn:task id="C" name="В"/>'
+    base = write(d, "base.bpmn", lanes_doc(ln("L", "A", "B") + ln("M")))
+    v_l = write(d, "v_l.bpmn", lanes_doc(ln("L", "A", "B", "C") + ln("M"), tasks))
+    v_n = write(d, "v_n.bpmn", lanes_doc(ln("L", "A", "B") + ln("M") + ln("N", "C"), tasks))
+    errs = []
+    for title, files, want in (("первый положил в L", [v_l, v_n], {"L"}), ("первый положил в новую N", [v_n, v_l], {"N"})):
+        r = bm.merge(base, files, ["Андрей", "Даниил"], accept=[])
+        m = r["merged"]
+        if "C" not in m.by_id or "N" not in m.by_id:
+            errs.append("%s: сломан сценарий — C или N не добавлены" % title)
+            continue
+        if r["conflicts"]:
+            errs.append("%s: лишний конфликт %s" % (title, r["conflicts"]))
+        if lanes_with(m, "C") != want:
+            errs.append("%s: C в %s, ждали только %s" % (title, sorted(lanes_with(m, "C")), sorted(want)))
+        if dup_refs(m) or r["problems"]:
+            errs.append("%s: повторы %s, проблемы %s" % (title, dup_refs(m), r["problems"]))
+    ok(not errs, "T-0196 AC-6: одинаковый новый блок в разных дорожках — " + "; ".join(errs))
+
+
+def ac1_trailing_sep(d):
+    """J. -o или --report с косой чертой в конце, такой папки нет: стоп с понятным текстом, ничего не записано."""
+    cases = [("-o «rr/»", lambda c: ["-o", os.path.join(c, "rr") + "/", "--report", os.path.join(c, "rep.md")]),
+             ("--report «rr» + os.sep", lambda c: ["-o", os.path.join(c, "out.bpmn"), "--report", os.path.join(c, "rr") + os.sep])]
+    errs = []
+    for n, (title, argv) in enumerate(cases):
+        c = sub(d, "c%d" % n)
+        base = write(c, "base.bpmn", schema())
+        v1 = write(c, "v1.bpmn", schema(extra_proc=NOTE[0], extra_di=NOTE[1]))
+        before = tree(c)
+        try:
+            code, out = run_main([base, v1] + argv(c))
+        except Exception as e:
+            code, out = None, ""
+            errs.append("%s: упало %s: %s вместо остановки с понятным текстом" % (title, type(e).__name__, e))
+        after = tree(c)
+        if code == 0:
+            errs.append("%s: код выхода 0" % title)
+        if after != before:
+            errs.append("%s: на диске что-то записано: %s" % (title, sorted(set(after) ^ set(before)) or
+                                                              [k for k in after if after[k] != before.get(k)]))
+        if code not in (None, 0) and "rr" not in out:
+            errs.append("%s: в тексте остановки не назван путь rr: %r" % (title, out[-200:]))
+    ok(not errs, "T-0196 AC-1: путь с косой чертой в конце — " + "; ".join(errs))
+
+
+def ac4_accept_twice(d):
+    """K. --accept B,B: правка применена один раз, в «Принято» одна строка."""
+    base = write(d, "base.bpmn", lanes_doc(ln("L", "A", "B") + ln("M")))
+    v = write(d, "v.bpmn", lanes_doc(ln("L", "A") + ln("M", "B"), '<bpmn:task id="A" name="А"/><bpmn:task id="B" name="Б2"/>'))
+    r = bm.merge(base, [v], ["Андрей"], accept=["B", "B"])
+    m = r["merged"]
+    ok(m.by_id["B"].get("name") == "Б2" and lanes_with(m, "B") == {"M"},
+       "T-0196 AC-4: --accept B,B не применил правку Б: имя «%s», дорожки %s" % (m.by_id["B"].get("name"), sorted(lanes_with(m, "B"))))
+    n_app = sum(1 for a in r["applied"] if a[0] == "B")
+    text = bm.report(r, base, [v], ["Андрей"], os.path.join(d, "out.bpmn"))
+    sec = text.split("## Принято по --accept", 1)[1].split("\n## ", 1)[0] if "## Принято по --accept" in text else ""
+    n_rep = sum(1 for line in sec.splitlines() if line.startswith("- `B`"))
+    ok(n_app == 1 and n_rep == 1, "T-0196 AC-4: --accept B,B — в «Принято» %d строк(и) про Б в отчёте и %d в applied, ждали одну"
+       % (n_rep, n_app))
+    ok(not dup_refs(m) and not r["problems"], "T-0196 AC-4: повторы %s, проблемы %s" % (dup_refs(m), r["problems"]))
+
+
 CHECKS = [("прежние проверки", old_checks), ("T-0196 AC-1", ac1), ("T-0196 AC-2", ac2), ("T-0196 AC-3", ac3),
           ("T-0196 AC-4", ac4), ("T-0196 AC-5", ac5), ("T-0196 AC-6", ac6), ("T-0196 AC-7", ac7),
           ("T-0196 AC-6 поддорожки", ac6_nested), ("T-0196 AC-6 новая дорожка", ac6_new_lane),
           ("T-0196 AC-6 без дублей", ac6_no_dups), ("T-0196 AC-6 дорожки нет", ac6_lane_missing),
           ("T-0196 AC-5 части элемента", ac5_parts), ("T-0196 AC-5 название группы", ac5_category),
-          ("T-0196 AC-5 чертёж", ac5_plane), ("T-0196 AC-1 папки", ac1_dirs), ("T-0196 AC-1 жёсткая ссылка", ac1_hardlink)]
+          ("T-0196 AC-5 чертёж", ac5_plane), ("T-0196 AC-1 папки", ac1_dirs), ("T-0196 AC-1 жёсткая ссылка", ac1_hardlink),
+          ("T-0196 AC-6 автор удалил дорожку", ac6_lane_deleted), ("T-0196 AC-6 дорожка под конфликтом", ac6_lane_conflict),
+          ("T-0196 AC-6 одинаковый новый блок", ac6_same_block), ("T-0196 AC-1 косая черта в конце", ac1_trailing_sep),
+          ("T-0196 AC-4 повтор в --accept", ac4_accept_twice)]
 
 
 def main():
