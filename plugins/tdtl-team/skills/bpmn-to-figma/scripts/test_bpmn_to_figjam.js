@@ -272,6 +272,21 @@ const human = (sec, type, name) => { const n = new N(type); n.name = name; sec.a
   ok(own(sec2, b0) && own(sec2, b0) !== c0, 'T-0220 AC-2: вернувшийся блок не нарисован во второй секции заново');
   ok(look(c1) === c1was && named.includes(b1), 'T-0220 AC-1: метка gone, записанная в первой секции прежней версией, не учтена — копию затёрли или не назвали: ' +
     JSON.stringify([c1.parent && c1.parent.name, c1.x, c1.y, c1.text.characters, q2.dups, q2.unknown]));
+  // На «Общем» секция части лежит внутри секции направления (путь --section). Прежняя версия удалила блок и записала
+  // его id в метку gone этой вложенной секции; в той же секции — Ctrl+D-копия блока. Запуск с --section не должен
+  // принять копию за вырезанный блок.
+  const T4 = title + ' · вложенная', dir = Object.assign(new N('SECTION'), {name: 'Направление'}); common.appendChild(dir);
+  ok((await run(next, slice(T4, ids1))).fresh, 'T-0220: секция для вложенной проверки не легла новой');
+  const s4 = author.children.find(n => n.type === 'SECTION' && n.name === T4); dir.appendChild(s4);
+  const o4 = own(s4, b1);
+  const c4 = Object.assign(new N(o4.type), {name: o4.name, x: 5, y: 6, spd: {...o4.spd},
+    text: {characters: 'Копия человека', fontName: {family: 'Inter', style: 'Medium'}}}); s4.appendChild(c4);
+  const lg4 = s4.getSharedPluginData(NS, 'gone'); o4.remove(); s4.setSharedPluginData(NS, 'gone', (lg4 ? lg4 + ',' : '') + o4.id);
+  const c4was = look(c4);
+  const q4 = await run(next, d => { slice(T4, ids1)(d); d.sectionId = s4.id; delete d.page; });
+  ok(look(c4) === c4was && [...q4.dups, ...q4.unknown].includes(b1),
+    'T-0220 AC-1: метка gone прежней версии во вложенной секции (--section на «Общем») не учтена — копию затёрли или не назвали: ' +
+    JSON.stringify([c4.parent && c4.parent.name, c4.x, c4.y, c4.text.characters, q4.dups, q4.unknown]));
 
   // T-0220 AC-3: gone загружен до check(sec). Скрипт сам секций не удаляет — состояние искусственное: id исходной секции
   // лежит в её метке gone, секцию скопировали (Ctrl+D, метки те же), исходную удалили. Если gone загружен до проверки
