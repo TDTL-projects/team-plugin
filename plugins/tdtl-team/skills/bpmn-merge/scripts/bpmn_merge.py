@@ -17,6 +17,7 @@ import argparse
 import copy
 import os
 import re
+import io
 import sys
 import xml.etree.ElementTree as ET
 
@@ -54,11 +55,20 @@ def short(s, n=70):
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
+STD_PREFIXES = (("bpmn", BPMN_NS), ("bpmndi", DI_NS), ("dc", "http://www.omg.org/spec/DD/20100524/DC"),
+                ("di", "http://www.omg.org/spec/DD/20100524/DI"))
+
+
 def register_namespaces(paths):
     for p in paths:
-        raw = open(p, encoding="utf-8").read()
+        with open(p, encoding="utf-8") as f:
+            raw = f.read()
         for prefix, uri in re.findall(r'xmlns:([\w-]+)="([^"]+)"', raw):
+            if re.fullmatch(r"ns\d+", prefix):
+                continue  # так пишет сам ElementTree; register_namespace такие префиксы не принимает
             ET.register_namespace(prefix, uri)
+    for prefix, uri in STD_PREFIXES:  # привычные префиксы BPMN — последними, чтобы победили
+        ET.register_namespace(prefix, uri)
 
 
 class Doc:
@@ -80,6 +90,13 @@ class Doc:
         for el in self.root.iter():
             if el.get("bpmnElement"):
                 self.di_of.setdefault(el.get("bpmnElement"), []).append(el)
+        # в какой дорожке блок: самая вложенная (поддорожки идут в документе после своей дорожки)
+        self.lane_of, self.lane_name = {}, {}
+        for el in self.root.iter(B + "lane"):
+            self.lane_name[el.get("id")] = el.get("name") or el.get("id")
+            for c in el:
+                if local(c.tag) == "flowNodeRef" and (c.text or "").strip():
+                    self.lane_of[c.text.strip()] = el.get("id")
 
     def id_parent(self, el):
         p = self.parent.get(el)
@@ -146,13 +163,18 @@ def fmt(v):
     return str(int(v)) if float(v).is_integer() else str(round(v, 2))
 
 
-def signature(el, dx=0, dy=0):
+LANE = "__lane"  # дорожка блока — в подписи блока: перенос между дорожками — правка блока, а не дорожек
+
+
+def signature(el, dx=0, dy=0, lane=None):
     """Значимое содержимое элемента без его детей-с-id и без шума инструментов."""
     attrs = []
     for k, v in sorted(el.attrib.items()):
         if local(k) in NOISE_ATTRS:
             continue
         attrs.append((local(k), v))
+    if lane:
+        attrs.append((LANE, lane))
     kids = []
     for c in el:
         if c.get("id") or local(c.tag) in NOISE_CHILDREN:
@@ -175,8 +197,8 @@ def child_sig(c, dx=0, dy=0):
     return (local(c.tag), tuple(attrs), " ".join((c.text or "").split()), kids)
 
 
-def explain(old, new):
-    """Что именно поменялось — короткими словами для отчёта."""
+def explain(old, new, lane_names=None):
+    """Что именно поменялось — короткими словами для отчёта. lane_names: id дорожки -> название."""
     _, oa, ot, ok = old
     _, na, nt, nk = new
     out = []
@@ -184,8 +206,12 @@ def explain(old, new):
     names = {"name": "название", "value": "название", "fill": "цвет заливки", "stroke": "цвет линии",
              "background-color": None, "border-color": None, "sourceRef": "откуда", "targetRef": "куда",
              "isExpanded": "развёрнут", "isHorizontal": "горизонтальный"}
+    if oa.get(LANE) != na.get(LANE):
+        ln = lane_names or {}
+        out.append("дорожка: «%s» → «%s»" % (ln.get(oa.get(LANE), oa.get(LANE)) or "(нет)",
+                                             ln.get(na.get(LANE), na.get(LANE)) or "(нет)"))
     for k in sorted(set(oa) | set(na)):
-        if oa.get(k) == na.get(k) or names.get(k, k) is None:
+        if k == LANE or oa.get(k) == na.get(k) or names.get(k, k) is None:
             continue
         out.append('%s: «%s» → «%s»' % (names.get(k, k), short(oa.get(k, ""), 50) or "(пусто)",
                                         short(na.get(k, ""), 50) or "(пусто)"))
@@ -269,12 +295,87 @@ def check(doc):
     return problems
 
 
+HEAD_TAGS = {"documentation", "extensionElements", "auditing", "monitoring", "text"}
+BLOCK_ATTRS = REF_ATTRS - {"bpmnElement", "categoryValueRef", "calledElement_ignore"}
+
+
+def accept_change(merged, t, src, sh, new_lane, failed):
+    """Принять правку элемента t из версии автора. Ссылки-дети (incoming, outgoing, flowNodeRef) остаются из собранной:
+    их могли добавить другой автор или сама сборка. Принятый конец стрелки перевешивает incoming/outgoing,
+    принятый перенос блока — flowNodeRef между дорожками."""
+    dst = merged.by_id[t]
+    ns = dst.tag[:dst.tag.index("}") + 1] if "}" in dst.tag else ""
+    old_ends = {a: dst.get(a) for a in ("sourceRef", "targetRef")}
+    old_lane = merged.lane_of.get(t)
+    dst.attrib.clear()
+    dst.attrib.update(src.attrib)
+    dst.text = src.text
+    refs = [c for c in dst if not c.get("id") and local(c.tag) in REF_CHILDREN]
+    kids = [c for c in dst if c.get("id")]
+    plain = []
+    for c in src:
+        if not c.get("id") and local(c.tag) not in REF_CHILDREN:
+            cc = copy.deepcopy(c)
+            shift(cc, -sh[0], -sh[1])
+            plain.append(cc)
+    n = 0
+    while n < len(plain) and local(plain[n].tag) in HEAD_TAGS:
+        n += 1
+    for c in list(dst):
+        dst.remove(c)
+    for c in plain[:n] + refs + plain[n:] + kids:
+        dst.append(c)
+    if not len(dst) and not (dst.text or "").strip():
+        dst.text = None   # детей не осталось — отступ перед ними не нужен
+    if local(dst.tag) == "sequenceFlow":
+        for attr, ref in (("sourceRef", "outgoing"), ("targetRef", "incoming")):
+            old, new = old_ends[attr], dst.get(attr)
+            if old == new:
+                continue
+            if old in merged.by_id:
+                for c in list(merged.by_id[old]):
+                    if local(c.tag) == ref and (c.text or "").strip() == t:
+                        merged.by_id[old].remove(c)
+            if new in merged.by_id and t not in [(c.text or "").strip() for c in merged.by_id[new] if local(c.tag) == ref]:
+                add_ref(merged.by_id[new], ns + ref, t)
+    if new_lane != old_lane:
+        if new_lane and new_lane not in merged.by_id:
+            failed.append(("—", t, "перенос не применён: дорожки %s нет в собранной версии" % new_lane))
+            return
+        if old_lane in merged.by_id:
+            for c in list(merged.by_id[old_lane]):
+                if local(c.tag) == "flowNodeRef" and (c.text or "").strip() == t:
+                    merged.by_id[old_lane].remove(c)
+        if new_lane:
+            add_ref(merged.by_id[new_lane], ns + "flowNodeRef", t)
+
+
+def delete_blockers(merged, t):
+    """Почему элемент t нельзя удалить: на него ссылаются или внутри него есть элементы. Пусто — можно."""
+    el = merged.by_id.get(t)
+    if el is None:
+        return ""
+    inside = {id(x) for x in el.iter()}
+    users = ["%s (%s)" % (x.get("id") or local(x.tag), local(k)) for x in merged.root.iter() if id(x) not in inside
+             for k, v in x.attrib.items() if local(k) in BLOCK_ATTRS and v == t]
+    nested = [x.get("id") for x in el.iter() if x is not el and x.get("id")]
+    lane_refs = [(c.text or "").strip() for c in el if local(c.tag) == "flowNodeRef"] if local(el.tag) == "lane" else []
+    why = []
+    if users:
+        why.append("на него ссылаются " + ", ".join(users))
+    if nested:
+        why.append("внутри есть элементы " + ", ".join(nested))
+    if lane_refs:
+        why.append("в дорожке блоки " + ", ".join(lane_refs))
+    return "; ".join(why)
+
+
 def merge(base_path, version_paths, authors, accept):
     register_namespaces([base_path] + version_paths)
     base = Doc(base_path)
     merged = Doc(base_path)
     versions = [Doc(p) for p in version_paths]
-    base_sig = {i: signature(el) for i, el in base.by_id.items()}
+    base_sig = {i: signature(el, lane=base.lane_of.get(i)) for i, el in base.by_id.items()}
 
     added, changes, deletions, conflicts, failed = [], {}, {}, [], []
     added_from = {}  # id -> автор
@@ -327,9 +428,9 @@ def merge(base_path, version_paths, authors, accept):
             if iid not in v.by_id:
                 deletions.setdefault(iid, []).append(author)
                 continue
-            vsig = signature(v.by_id[iid], dx, dy)
+            vsig = signature(v.by_id[iid], dx, dy, lane=v.lane_of.get(iid))
             if vsig != bsig:
-                changes.setdefault(iid, []).append((author, vsig, explain(bsig, vsig), v))
+                changes.setdefault(iid, []).append((author, vsig, explain(bsig, vsig, {**base.lane_name, **v.lane_name}), v))
 
     # конфликты: один элемент по-разному у разных авторов, или удалён у одного и изменён у другого
     for iid, lst in changes.items():
@@ -341,50 +442,39 @@ def merge(base_path, version_paths, authors, accept):
                               base.describe(iid)))
     conflict_ids = {c[0] for c in conflicts}
 
-    # принятые правки
+    # принятые правки: сначала все изменения, потом удаления в порядке --accept (вложенное — раньше того, во что вложено).
+    # Только названные id: чертёж Task_di принимается, только если назван сам (положение — отдельная строка отчёта).
     applied = []
-    for iid in accept:
-        targets = [iid] + [d.get("id") for d in base.di_of.get(iid, []) if d.get("id")]
-        for t in targets:
-            if t in conflict_ids:
-                failed.append(("—", t, "конфликт — сначала решите, чью версию брать"))
-                continue
-            if t in changes:
-                author, _, _, v = changes[t][0]
-                src, dst = v.by_id[t], merged.by_id[t]
-                dst.attrib.clear()
-                dst.attrib.update(src.attrib)
-                dst.text = src.text
-                keep = [c for c in dst if c.get("id")]
-                for c in list(dst):
-                    dst.remove(c)
-                sdx, sdy = shifts[author]
-                for c in src:
-                    if not c.get("id"):
-                        cc = copy.deepcopy(c)
-                        shift(cc, -sdx, -sdy)
-                        dst.append(cc)
-                for c in keep:
-                    dst.append(c)
-                applied.append((t, "изменение от " + author))
-            elif t in deletions:
-                el = merged.by_id.get(t)
-                if el is None:
-                    continue
-                users = [x for x in merged.root.iter()
-                         if any(v == t for k, v in x.attrib.items() if local(k) in ("sourceRef", "targetRef"))]
-                if users:
-                    failed.append(("—", t, "не удалён: на него ссылаются %s" % ", ".join(u.get("id") for u in users)))
-                    continue
-                for di in merged.di_of.get(t, []):
-                    merged.parent[di].remove(di)
-                for x in list(merged.root.iter()):
-                    for c in list(x):
-                        if local(c.tag) in REF_CHILDREN and (c.text or "").strip() == t:
-                            x.remove(c)
-                merged.parent[el].remove(el)
-                applied.append((t, "удаление от " + ", ".join(deletions[t])))
+    todo_del = []
+    for t in accept:
+        if t in conflict_ids:
+            failed.append(("—", t, "конфликт — сначала решите, чью версию брать"))
+        elif t in changes:
+            author, vsig, _, v = changes[t][0]
+            accept_change(merged, t, v.by_id[t], shifts[author], dict(vsig[1]).get(LANE), failed)
+            applied.append((t, "изменение от " + author))
             merged.reindex()
+        elif t in deletions:
+            todo_del.append(t)
+        else:
+            failed.append(("—", t, "у этого id нет правки или удаления на решение — проверьте id"))
+    for t in todo_del:
+        why = delete_blockers(merged, t)
+        if why:
+            failed.append(("—", t, "не удалён: " + why))
+            continue
+        el = merged.by_id.get(t)
+        if el is None:
+            continue
+        for di in merged.di_of.get(t, []):
+            merged.parent[di].remove(di)
+        for x in list(merged.root.iter()):
+            for c in list(x):
+                if local(c.tag) in REF_CHILDREN and (c.text or "").strip() == t:
+                    x.remove(c)
+        merged.parent[el].remove(el)
+        applied.append((t, "удаление от " + ", ".join(deletions[t])))
+        merged.reindex()
 
     return {"base": base, "merged": merged, "added": added, "shifts": shifts, "dropped_cvr": max(dropped_cvr, 0), "changes": changes,
             "deletions": deletions, "conflicts": conflicts, "failed": failed,
@@ -466,16 +556,38 @@ def main():
     authors += [os.path.basename(p) for p in a.versions[len(authors):]]
     accept = [x.strip() for x in a.accept.split(",") if x.strip()]
 
+    # -o и --report — только новые файлы: перепутанные аргументы не должны затереть исходную или версию автора
+    inputs = {os.path.realpath(p): p for p in [a.base] + a.versions}
+    out_r, rep_r = os.path.realpath(a.out), os.path.realpath(a.report)
+    for flag, path, real in (("-o", a.out, out_r), ("--report", a.report, rep_r)):
+        if real in inputs:
+            ap.error("%s указывает на входной файл %s — он был бы перезаписан. Ничего не записано." % (flag, inputs[real]))
+    if out_r == rep_r:
+        ap.error("-o и --report указывают на один файл %s. Ничего не записано." % a.out)
+
     r = merge(a.base, a.versions, authors, accept)
-    r["merged"].tree.write(a.out, encoding="UTF-8", xml_declaration=True)
-    with open(a.report, "w", encoding="utf-8") as f:
-        f.write(report(r, a.base, a.versions, authors, a.out))
+    text = report(r, a.base, a.versions, authors, a.out)   # отчёт строится до записи: сбой в нём ничего не пишет
+    write_both(r["merged"].tree, a.out, text, a.report)
     n_sem = len([x for x in r["added"] if not r["merged"].by_id[x[1]].get("bpmnElement")])
     print("Добавлено: %d (и %d положений на схеме) | изменений: %d | удалений: %d | конфликтов: %d | принято: %d | проблем целостности: %d"
           % (n_sem, len(r["added"]) - n_sem, len(r["changes"]), len(r["deletions"]), len(r["conflicts"]),
              len(r["applied"]), len(r["problems"])))
+    for who, iid, why in r["failed"]:
+        print("Не получилось: %s — %s" % (iid, why))
     if r["problems"]:
         sys.exit(1)
+
+
+def write_both(tree, out, text, rep):
+    """Оба файла сначала целиком в памяти, запись на диск — последним шагом: сбой при сборке или отчёте
+    ничего не пишет. Временных файлов и удалений нет."""
+    buf = io.BytesIO()
+    tree.write(buf, encoding="UTF-8", xml_declaration=True)
+    data, rep_data = buf.getvalue(), text.encode("utf-8")
+    with open(out, "wb") as f:
+        f.write(data)
+    with open(rep, "wb") as f:
+        f.write(rep_data)
 
 
 if __name__ == "__main__":
