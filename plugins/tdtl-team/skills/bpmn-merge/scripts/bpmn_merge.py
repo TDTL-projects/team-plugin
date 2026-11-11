@@ -28,8 +28,18 @@ B = "{%s}" % BPMN_NS
 NOISE_CHILDREN = {"categoryValueRef", "incoming", "outgoing", "flowNodeRef"}
 NOISE_ATTRS = {"exporter", "exporterVersion"}
 REF_ATTRS = {"sourceRef", "targetRef", "bpmnElement", "processRef", "attachedToRef",
-             "default", "categoryValueRef", "calledElement_ignore"}
+             "default", "categoryValueRef", "calledElement_ignore",
+             "messageRef", "dataObjectRef", "dataStoreRef", "signalRef", "errorRef", "escalationRef",
+             "eventDefinitionRef", "sourceElement", "targetElement"}
 REF_CHILDREN = {"incoming", "outgoing", "flowNodeRef", "categoryValueRef"}
+# ссылки-дети, которые сборка не чинит сама: на элемент, на который они указывают, удаление не идёт
+DATA_ASSOC = {"dataInputAssociation", "dataOutputAssociation"}
+
+
+def block_child(parent, c):
+    """c — ссылка-ребёнок, которая держит элемент: sourceRef/targetRef ассоциации данных, eventDefinitionRef."""
+    t = local(c.tag)
+    return t == "eventDefinitionRef" or (t in ("sourceRef", "targetRef") and local(parent.tag) in DATA_ASSOC)
 
 KIND_RU = {
     "task": "Блок", "userTask": "Блок (человек)", "serviceTask": "Блок (система)",
@@ -90,13 +100,14 @@ class Doc:
         for el in self.root.iter():
             if el.get("bpmnElement"):
                 self.di_of.setdefault(el.get("bpmnElement"), []).append(el)
-        # в какой дорожке блок: самая вложенная (поддорожки идут в документе после своей дорожки)
-        self.lane_of, self.lane_name = {}, {}
+        # в каких дорожках блок: весь набор (bpmn.io пишет блок и в дорожку, и в её поддорожку)
+        lanes, self.lane_name = {}, {}
         for el in self.root.iter(B + "lane"):
             self.lane_name[el.get("id")] = el.get("name") or el.get("id")
             for c in el:
                 if local(c.tag) == "flowNodeRef" and (c.text or "").strip():
-                    self.lane_of[c.text.strip()] = el.get("id")
+                    lanes.setdefault(c.text.strip(), set()).add(el.get("id"))
+        self.lane_of = {k: tuple(sorted(v)) for k, v in lanes.items()}
 
     def id_parent(self, el):
         p = self.parent.get(el)
@@ -163,7 +174,7 @@ def fmt(v):
     return str(int(v)) if float(v).is_integer() else str(round(v, 2))
 
 
-LANE = "__lane"  # дорожка блока — в подписи блока: перенос между дорожками — правка блока, а не дорожек
+LANE = "__lane"  # дорожки блока — в подписи блока: перенос между дорожками — правка блока, а не дорожек
 
 
 def signature(el, dx=0, dy=0, lane=None):
@@ -208,8 +219,13 @@ def explain(old, new, lane_names=None):
              "isExpanded": "развёрнут", "isHorizontal": "горизонтальный"}
     if oa.get(LANE) != na.get(LANE):
         ln = lane_names or {}
-        out.append("дорожка: «%s» → «%s»" % (ln.get(oa.get(LANE), oa.get(LANE)) or "(нет)",
-                                             ln.get(na.get(LANE), na.get(LANE)) or "(нет)"))
+        order = {k: i for i, k in enumerate(ln)}
+
+        def lanes(v):
+            v = sorted(v or (), key=lambda x: (order.get(x, len(order)), x))
+            return ", ".join("«%s»" % ln.get(x, x) for x in v) or "(нет)"
+        word = "дорожки" if max(len(oa.get(LANE) or ()), len(na.get(LANE) or ())) > 1 else "дорожка"
+        out.append("%s: %s → %s" % (word, lanes(oa.get(LANE)), lanes(na.get(LANE))))
     for k in sorted(set(oa) | set(na)):
         if k == LANE or oa.get(k) == na.get(k) or names.get(k, k) is None:
             continue
@@ -290,8 +306,10 @@ def check(doc):
         for k, v in el.attrib.items():
             if local(k) in REF_ATTRS and v and v not in seen and local(k) != "categoryValueRef":
                 problems.append("%s у %s ссылается на несуществующий %s" % (local(k), el.get("id") or local(el.tag), v))
-        if local(el.tag) in REF_CHILDREN and el.text and el.text.strip() not in seen:
-            problems.append("%s ссылается на несуществующий %s" % (local(el.tag), el.text.strip()))
+        for c in el:
+            if (local(c.tag) in REF_CHILDREN or block_child(el, c)) and c.text and c.text.strip() not in seen:
+                problems.append("%s у %s ссылается на несуществующий %s" % (local(c.tag), el.get("id") or local(el.tag),
+                                                                           c.text.strip()))
     return problems
 
 
@@ -373,9 +391,14 @@ def delete_blockers(merged, t):
     el = merged.by_id.get(t)
     if el is None:
         return ""
-    inside = {id(x) for x in el.iter()}
+    # удаляется элемент вместе с чертежом: ссылки снаружи на любой id из них держат удаление
+    gone = [x for x in el.iter()] + [x for d in merged.di_of.get(t, []) for x in d.iter()]
+    inside = {id(x) for x in gone}
+    targets = {x.get("id") for x in gone if x.get("id")}
     users = ["%s (%s)" % (x.get("id") or local(x.tag), local(k)) for x in merged.root.iter() if id(x) not in inside
-             for k, v in x.attrib.items() if local(k) in BLOCK_ATTRS and v == t]
+             for k, v in x.attrib.items() if local(k) in BLOCK_ATTRS and v in targets]
+    users += ["%s (%s)" % (x.get("id") or local(x.tag), local(c.tag)) for x in merged.root.iter() for c in x
+              if id(c) not in inside and block_child(x, c) and (c.text or "").strip() in targets]
     planes = [d.get("id") or local(d.tag) for d in merged.di_of.get(t, []) if local(d.tag) in ("BPMNPlane", "BPMNDiagram")]
     nested = []
 
@@ -449,7 +472,13 @@ def merge(base_path, version_paths, authors, accept):
                         new_ids.append(x.get("id"))
                 added.append((author, iid, v.describe(iid)))
             else:
-                failed.append((author, iid, v.describe(iid)))
+                p = v.id_parent(el)
+                if p is None:
+                    why = ("у автора другой id корня документа (%s, в исходной %s) — новое верхнего уровня не добавлено,"
+                           " проверьте, та ли это копия" % (iid, base.root.get("id")))
+                else:
+                    why = "у автора вложен в %s, а его нет в собранной версии" % p.get("id")
+                failed.append((author, iid, "%s — не добавлен: %s" % (v.describe(iid), why)))
         # ссылки существующих элементов на новые (incoming/outgoing стрелок, flowNodeRef дорожек)
         new_set = set(new_ids)
         for iid, el in v.by_id.items():
@@ -603,7 +632,8 @@ def main():
         return os.path.realpath(x) == os.path.realpath(y) or (
             os.path.exists(x) and os.path.exists(y) and os.path.samefile(x, y))   # жёсткая ссылка, регистр букв
 
-    for flag, path in (("-o", a.out), ("--report", a.report)):
+    outs = (("-o", a.out), ("--report", a.report))
+    for flag, path in outs:
         if path.endswith(os.sep) or (os.altsep and path.endswith(os.altsep)):
             ap.error("%s указывает на папку %s, а нужен файл. Ничего не записано." % (flag, path))
         folder = os.path.dirname(os.path.abspath(path))
@@ -616,10 +646,21 @@ def main():
                 ap.error("%s указывает на входной файл %s — он был бы перезаписан. Ничего не записано." % (flag, p))
     if same(a.out, a.report):
         ap.error("-o и --report указывают на один файл %s. Ничего не записано." % a.out)
+    for flag, path in outs:   # чужая копия или прошлая сборка, которую уже правили руками, — не затираем
+        if os.path.lexists(path):
+            ap.error("%s: файл %s уже есть, скрипт существующие файлы не перезаписывает — дайте новое имя"
+                     " (например «…, 2»). Ничего не записано." % (flag, path))
+    for flag, path in outs:
+        folder = os.path.dirname(os.path.abspath(path))
+        if not os.access(folder, os.W_OK | os.X_OK):
+            ap.error("%s: нет права записи в папку %s. Ничего не записано." % (flag, folder))
 
     r = merge(a.base, a.versions, authors, accept)
     text = report(r, a.base, a.versions, authors, a.out)   # отчёт строится до записи: сбой в нём ничего не пишет
-    write_both(r["merged"].tree, a.out, text, a.report)
+    err = write_both(r["merged"].tree, a.out, text, a.report)
+    if err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
     n_sem = len([x for x in r["added"] if not r["merged"].by_id[x[1]].get("bpmnElement")])
     print("Добавлено: %d (и %d положений на схеме) | изменений: %d | удалений: %d | конфликтов: %d | принято: %d | проблем целостности: %d"
           % (n_sem, len(r["added"]) - n_sem, len(r["changes"]), len(r["deletions"]), len(r["conflicts"]),
@@ -631,15 +672,24 @@ def main():
 
 
 def write_both(tree, out, text, rep):
-    """Оба файла сначала целиком в памяти, запись на диск — последним шагом: сбой при сборке или отчёте
-    ничего не пишет. Временных файлов и удалений нет."""
+    """Оба файла сначала целиком в памяти, на диск — последним шагом и только новыми файлами ("xb").
+    Отчёт пишется раньше схемы: схемы без отчёта (без списка непринятых правок) не бывает.
+    Временных файлов и удалений нет. -> пусто, если записано всё; иначе текст ошибки для человека."""
     buf = io.BytesIO()
     tree.write(buf, encoding="UTF-8", xml_declaration=True)
     data, rep_data = buf.getvalue(), text.encode("utf-8")
-    with open(out, "wb") as f:
-        f.write(data)
-    with open(rep, "wb") as f:
-        f.write(rep_data)
+    try:
+        with open(rep, "xb") as f:
+            f.write(rep_data)
+    except OSError as e:
+        return "Ошибка записи: отчёт %s не записан (%s), схема не записана: ничего не выкладывать." % (rep, e)
+    try:
+        with open(out, "xb") as f:
+            f.write(data)
+    except OSError as e:
+        return ("Ошибка записи: отчёт записан (%s), схема %s — нет (%s): не выкладывать, запустите сборку ещё раз"
+                " с новыми именами." % (rep, out, e))
+    return ""
 
 
 if __name__ == "__main__":
