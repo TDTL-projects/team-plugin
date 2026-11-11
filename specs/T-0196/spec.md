@@ -43,7 +43,7 @@ python3 -I plugins/tdtl-team/skills/bpmn-merge/scripts/test_bpmn_merge.py
 
 ```
 W=/tmp/t0196; rm -rf $W; mkdir -p $W/old $W/new
-git show main:plugins/tdtl-team/skills/bpmn-merge/scripts/bpmn_merge.py > $W/bpmn_merge_old.py
+git show origin/main:plugins/tdtl-team/skills/bpmn-merge/scripts/bpmn_merge.py > $W/bpmn_merge_old.py
 S="<папка со схемами T-0124>"; B="$S/T-0124_BRK-TOBE_xrv-processes-to-be.bpmn"; V="$S/V2_T-0124_BRK-TOBE_xrv-processes-to-be.bpmn"
 ACC=BRK-TOBE_F015,BRK-TOBE_C01_di,BRK-TOBE_F051_di,BRK-TOBE_N06_di
 for k in old new; do P=$([ $k = old ] && echo $W/bpmn_merge_old.py || echo $PWD/plugins/tdtl-team/skills/bpmn-merge/scripts/bpmn_merge.py)

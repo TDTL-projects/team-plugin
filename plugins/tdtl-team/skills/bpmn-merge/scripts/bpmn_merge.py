@@ -319,8 +319,10 @@ def accept_change(merged, t, v, sh, conflict_ids=()):
     Дорожка, куда перенесён блок, должна быть дорожкой в собранной и не под конфликтом — иначе правка не применяется."""
     src, dst = v.by_id[t], merged.by_id[t]
     want, have = lanes_with(v, t), lanes_with(merged, t)
-    missing = [ln for ln in sorted(want - have)
-               if ln not in merged.by_id or local(merged.by_id[ln].tag) != "lane" or ln in conflict_ids]
+    disputed = [ln for ln in sorted(want - have) if ln in conflict_ids]
+    if disputed:
+        return "дорожка %s, куда перенесён блок, под конфликтом — сначала решите её" % ", ".join(disputed)
+    missing = [ln for ln in sorted(want - have) if ln not in merged.by_id or local(merged.by_id[ln].tag) != "lane"]
     if missing:
         return "дорожки %s, куда перенесён блок, нет в собранной версии" % ", ".join(missing)
     ns = dst.tag[:dst.tag.index("}") + 1] if "}" in dst.tag else ""
