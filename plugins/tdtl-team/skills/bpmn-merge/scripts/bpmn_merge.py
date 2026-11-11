@@ -15,9 +15,9 @@
 """
 import argparse
 import copy
+import io
 import os
 import re
-import io
 import sys
 import xml.etree.ElementTree as ET
 
@@ -296,17 +296,33 @@ def check(doc):
 
 
 HEAD_TAGS = {"documentation", "extensionElements", "auditing", "monitoring", "text"}
-BLOCK_ATTRS = REF_ATTRS - {"bpmnElement", "categoryValueRef", "calledElement_ignore"}
+BLOCK_ATTRS = REF_ATTRS - {"bpmnElement", "calledElement_ignore"}
+# части элемента — не «вложенные элементы»: удаляются вместе с ним
+PART_TAGS = {"ioSpecification", "property", "dataInput", "dataOutput", "inputSet", "outputSet", "conditionExpression",
+             "documentation", "extensionElements", "resourceRole", "performer", "humanPerformer", "potentialOwner"}
 
 
-def accept_change(merged, t, src, sh, new_lane, failed):
-    """Принять правку элемента t из версии автора. Ссылки-дети (incoming, outgoing, flowNodeRef) остаются из собранной:
-    их могли добавить другой автор или сама сборка. Принятый конец стрелки перевешивает incoming/outgoing,
-    принятый перенос блока — flowNodeRef между дорожками."""
-    dst = merged.by_id[t]
+def is_part(tag):
+    return tag in PART_TAGS or tag.endswith("EventDefinition") or tag.endswith("LoopCharacteristics")
+
+
+def lanes_with(doc, t):
+    return {el.get("id") for el in doc.root.iter(B + "lane")
+            if any(local(c.tag) == "flowNodeRef" and (c.text or "").strip() == t for c in el)}
+
+
+def accept_change(merged, t, v, sh):
+    """Принять правку элемента t из версии автора v. Пусто — принята; иначе причина, и ничего не изменено.
+    Ссылки-дети (incoming, outgoing, flowNodeRef) остаются из собранной: их могли добавить другой автор или сама сборка.
+    Принятый конец стрелки перевешивает incoming/outgoing; дорожки блока становятся такими, как у автора
+    (ссылка убирается только из дорожек, которые есть у автора, — дорожки других авторов не трогаем)."""
+    src, dst = v.by_id[t], merged.by_id[t]
+    want, have = lanes_with(v, t), lanes_with(merged, t)
+    missing = [ln for ln in sorted(want - have) if ln not in merged.by_id or local(merged.by_id[ln].tag) != "lane"]
+    if missing:
+        return "дорожки %s, куда перенесён блок, нет в собранной версии" % ", ".join(missing)
     ns = dst.tag[:dst.tag.index("}") + 1] if "}" in dst.tag else ""
     old_ends = {a: dst.get(a) for a in ("sourceRef", "targetRef")}
-    old_lane = merged.lane_of.get(t)
     dst.attrib.clear()
     dst.attrib.update(src.attrib)
     dst.text = src.text
@@ -338,31 +354,42 @@ def accept_change(merged, t, src, sh, new_lane, failed):
                         merged.by_id[old].remove(c)
             if new in merged.by_id and t not in [(c.text or "").strip() for c in merged.by_id[new] if local(c.tag) == ref]:
                 add_ref(merged.by_id[new], ns + ref, t)
-    if new_lane != old_lane:
-        if new_lane and new_lane not in merged.by_id:
-            failed.append(("—", t, "перенос не применён: дорожки %s нет в собранной версии" % new_lane))
-            return
-        if old_lane in merged.by_id:
-            for c in list(merged.by_id[old_lane]):
+    for ln in have - want:
+        if ln in v.by_id:
+            for c in list(merged.by_id[ln]):
                 if local(c.tag) == "flowNodeRef" and (c.text or "").strip() == t:
-                    merged.by_id[old_lane].remove(c)
-        if new_lane:
-            add_ref(merged.by_id[new_lane], ns + "flowNodeRef", t)
+                    merged.by_id[ln].remove(c)
+    for ln in sorted(want - have):
+        add_ref(merged.by_id[ln], ns + "flowNodeRef", t)
+    return ""
 
 
 def delete_blockers(merged, t):
-    """Почему элемент t нельзя удалить: на него ссылаются или внутри него есть элементы. Пусто — можно."""
+    """Почему элемент t нельзя удалить: на него ссылаются, на нём держится чертёж или внутри него есть элементы.
+    Пусто — можно."""
     el = merged.by_id.get(t)
     if el is None:
         return ""
     inside = {id(x) for x in el.iter()}
     users = ["%s (%s)" % (x.get("id") or local(x.tag), local(k)) for x in merged.root.iter() if id(x) not in inside
              for k, v in x.attrib.items() if local(k) in BLOCK_ATTRS and v == t]
-    nested = [x.get("id") for x in el.iter() if x is not el and x.get("id")]
+    planes = [d.get("id") or local(d.tag) for d in merged.di_of.get(t, []) if local(d.tag) in ("BPMNPlane", "BPMNDiagram")]
+    nested = []
+
+    def walk(n):
+        for c in n:
+            if is_part(local(c.tag)):
+                continue
+            if c.get("id"):
+                nested.append(c.get("id"))
+            walk(c)
+    walk(el)
     lane_refs = [(c.text or "").strip() for c in el if local(c.tag) == "flowNodeRef"] if local(el.tag) == "lane" else []
     why = []
     if users:
         why.append("на него ссылаются " + ", ".join(users))
+    if planes:
+        why.append("на нём держится чертёж " + ", ".join(planes))
     if nested:
         why.append("внутри есть элементы " + ", ".join(nested))
     if lane_refs:
@@ -402,6 +429,11 @@ def merge(base_path, version_paths, authors, accept):
             for c in list(new):
                 if local(c.tag) == "categoryValueRef":
                     new.remove(c)
+            # новая дорожка приходит без ссылок на блоки, которые были в исходной: их перенос — правка блока, на решение
+            for ln in new.iter(B + "lane"):
+                for c in list(ln):
+                    if local(c.tag) == "flowNodeRef" and (c.text or "").strip() in base.by_id:
+                        ln.remove(c)
             shift(new, -dx, -dy)
             if insert_like(merged, v, el, new):
                 merged.reindex()
@@ -451,7 +483,10 @@ def merge(base_path, version_paths, authors, accept):
             failed.append(("—", t, "конфликт — сначала решите, чью версию брать"))
         elif t in changes:
             author, vsig, _, v = changes[t][0]
-            accept_change(merged, t, v.by_id[t], shifts[author], dict(vsig[1]).get(LANE), failed)
+            why = accept_change(merged, t, v, shifts[author])
+            if why:
+                failed.append(("—", t, "правка не применена: " + why))
+                continue
             applied.append((t, "изменение от " + author))
             merged.reindex()
         elif t in deletions:
@@ -557,12 +592,21 @@ def main():
     accept = [x.strip() for x in a.accept.split(",") if x.strip()]
 
     # -o и --report — только новые файлы: перепутанные аргументы не должны затереть исходную или версию автора
-    inputs = {os.path.realpath(p): p for p in [a.base] + a.versions}
-    out_r, rep_r = os.path.realpath(a.out), os.path.realpath(a.report)
-    for flag, path, real in (("-o", a.out, out_r), ("--report", a.report, rep_r)):
-        if real in inputs:
-            ap.error("%s указывает на входной файл %s — он был бы перезаписан. Ничего не записано." % (flag, inputs[real]))
-    if out_r == rep_r:
+    # Всё — до сборки, чтобы сбой не случился посередине записи (схема записана, отчёт нет).
+    def same(x, y):
+        return os.path.realpath(x) == os.path.realpath(y) or (
+            os.path.exists(x) and os.path.exists(y) and os.path.samefile(x, y))   # жёсткая ссылка, регистр букв
+
+    for flag, path in (("-o", a.out), ("--report", a.report)):
+        folder = os.path.dirname(os.path.abspath(path))
+        if not os.path.isdir(folder):
+            ap.error("%s: папки %s нет. Ничего не записано." % (flag, folder))
+        if os.path.isdir(path):
+            ap.error("%s указывает на папку %s, а нужен файл. Ничего не записано." % (flag, path))
+        for p in [a.base] + a.versions:
+            if same(path, p):
+                ap.error("%s указывает на входной файл %s — он был бы перезаписан. Ничего не записано." % (flag, p))
+    if same(a.out, a.report):
         ap.error("-o и --report указывают на один файл %s. Ничего не записано." % a.out)
 
     r = merge(a.base, a.versions, authors, accept)
