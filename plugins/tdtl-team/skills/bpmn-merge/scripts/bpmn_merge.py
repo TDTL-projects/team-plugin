@@ -35,12 +35,6 @@ REF_CHILDREN = {"incoming", "outgoing", "flowNodeRef", "categoryValueRef"}
 # ссылки-дети, которые сборка не чинит сама: на элемент, на который они указывают, удаление не идёт
 DATA_ASSOC = {"dataInputAssociation", "dataOutputAssociation"}
 
-
-def block_child(parent, c):
-    """c — ссылка-ребёнок, которая держит элемент: sourceRef/targetRef ассоциации данных, eventDefinitionRef."""
-    t = local(c.tag)
-    return t == "eventDefinitionRef" or (t in ("sourceRef", "targetRef") and local(parent.tag) in DATA_ASSOC)
-
 KIND_RU = {
     "task": "Блок", "userTask": "Блок (человек)", "serviceTask": "Блок (система)",
     "manualTask": "Блок", "scriptTask": "Блок", "businessRuleTask": "Блок", "sendTask": "Блок",
@@ -58,6 +52,12 @@ KIND_RU = {
 
 def local(tag):
     return tag.split("}", 1)[1] if "}" in tag else tag
+
+
+def block_child(parent, c):
+    """c — ссылка-ребёнок, которая держит элемент: sourceRef/targetRef ассоциации данных, eventDefinitionRef."""
+    t = local(c.tag)
+    return t == "eventDefinitionRef" or (t in ("sourceRef", "targetRef") and local(parent.tag) in DATA_ASSOC)
 
 
 def short(s, n=70):
@@ -477,7 +477,7 @@ def merge(base_path, version_paths, authors, accept):
                     why = ("у автора другой id корня документа (%s, в исходной %s) — новое верхнего уровня не добавлено,"
                            " проверьте, та ли это копия" % (iid, base.root.get("id")))
                 else:
-                    why = "у автора вложен в %s, а его нет в собранной версии" % p.get("id")
+                    why = "у автора вложен в %s, а его нет в собранной версии (см. строку %s)" % (p.get("id"), p.get("id"))
                 failed.append((author, iid, "%s — не добавлен: %s" % (v.describe(iid), why)))
         # ссылки существующих элементов на новые (incoming/outgoing стрелок, flowNodeRef дорожек)
         new_set = set(new_ids)
@@ -687,6 +687,12 @@ def write_both(tree, out, text, rep):
         with open(out, "xb") as f:
             f.write(data)
     except OSError as e:
+        try:   # предупреждение и в самом отчёте: его прочтут и без вывода скрипта
+            with open(rep, "ab") as f:
+                f.write(("\n## ⚠ Схема не записана — не выкладывать\n\nЗапись `%s` оборвалась (%s). Запустите сборку"
+                         " ещё раз с новыми именами.\n" % (os.path.basename(out), e)).encode("utf-8"))
+        except OSError:
+            pass
         return ("Ошибка записи: отчёт записан (%s), схема %s — нет (%s): не выкладывать, запустите сборку ещё раз"
                 " с новыми именами." % (rep, out, e))
     return ""
