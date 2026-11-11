@@ -311,14 +311,16 @@ def lanes_with(doc, t):
             if any(local(c.tag) == "flowNodeRef" and (c.text or "").strip() == t for c in el)}
 
 
-def accept_change(merged, t, v, sh):
+def accept_change(merged, t, v, sh, conflict_ids=()):
     """Принять правку элемента t из версии автора v. Пусто — принята; иначе причина, и ничего не изменено.
     Ссылки-дети (incoming, outgoing, flowNodeRef) остаются из собранной: их могли добавить другой автор или сама сборка.
     Принятый конец стрелки перевешивает incoming/outgoing; дорожки блока становятся такими, как у автора
-    (ссылка убирается только из дорожек, которые есть у автора, — дорожки других авторов не трогаем)."""
+    (ссылка снимается со всех дорожек собранной, где блока нет у автора, в том числе с дорожки, которую он удалил).
+    Дорожка, куда перенесён блок, должна быть дорожкой в собранной и не под конфликтом — иначе правка не применяется."""
     src, dst = v.by_id[t], merged.by_id[t]
     want, have = lanes_with(v, t), lanes_with(merged, t)
-    missing = [ln for ln in sorted(want - have) if ln not in merged.by_id or local(merged.by_id[ln].tag) != "lane"]
+    missing = [ln for ln in sorted(want - have)
+               if ln not in merged.by_id or local(merged.by_id[ln].tag) != "lane" or ln in conflict_ids]
     if missing:
         return "дорожки %s, куда перенесён блок, нет в собранной версии" % ", ".join(missing)
     ns = dst.tag[:dst.tag.index("}") + 1] if "}" in dst.tag else ""
@@ -355,10 +357,9 @@ def accept_change(merged, t, v, sh):
             if new in merged.by_id and t not in [(c.text or "").strip() for c in merged.by_id[new] if local(c.tag) == ref]:
                 add_ref(merged.by_id[new], ns + ref, t)
     for ln in have - want:
-        if ln in v.by_id:
-            for c in list(merged.by_id[ln]):
-                if local(c.tag) == "flowNodeRef" and (c.text or "").strip() == t:
-                    merged.by_id[ln].remove(c)
+        for c in list(merged.by_id[ln]):
+            if local(c.tag) == "flowNodeRef" and (c.text or "").strip() == t:
+                merged.by_id[ln].remove(c)
     for ln in sorted(want - have):
         add_ref(merged.by_id[ln], ns + "flowNodeRef", t)
     return ""
@@ -398,6 +399,7 @@ def delete_blockers(merged, t):
 
 
 def merge(base_path, version_paths, authors, accept):
+    accept = list(dict.fromkeys(accept))   # повтор id в --accept — один раз
     register_namespaces([base_path] + version_paths)
     base = Doc(base_path)
     merged = Doc(base_path)
@@ -429,10 +431,12 @@ def merge(base_path, version_paths, authors, accept):
             for c in list(new):
                 if local(c.tag) == "categoryValueRef":
                     new.remove(c)
-            # новая дорожка приходит без ссылок на блоки, которые были в исходной: их перенос — правка блока, на решение
+            # новая дорожка приходит без ссылок на блоки, которые были в исходной (их перенос — правка блока, на решение)
+            # и которые уже добавил другой автор (блок остаётся в дорожке того, кто добавил первым)
             for ln in new.iter(B + "lane"):
                 for c in list(ln):
-                    if local(c.tag) == "flowNodeRef" and (c.text or "").strip() in base.by_id:
+                    ref = (c.text or "").strip()
+                    if local(c.tag) == "flowNodeRef" and (ref in base.by_id or added_from.get(ref, author) != author):
                         ln.remove(c)
             shift(new, -dx, -dy)
             if insert_like(merged, v, el, new):
@@ -483,7 +487,7 @@ def merge(base_path, version_paths, authors, accept):
             failed.append(("—", t, "конфликт — сначала решите, чью версию брать"))
         elif t in changes:
             author, vsig, _, v = changes[t][0]
-            why = accept_change(merged, t, v, shifts[author])
+            why = accept_change(merged, t, v, shifts[author], conflict_ids)
             if why:
                 failed.append(("—", t, "правка не применена: " + why))
                 continue
@@ -598,6 +602,8 @@ def main():
             os.path.exists(x) and os.path.exists(y) and os.path.samefile(x, y))   # жёсткая ссылка, регистр букв
 
     for flag, path in (("-o", a.out), ("--report", a.report)):
+        if path.endswith(os.sep) or (os.altsep and path.endswith(os.altsep)):
+            ap.error("%s указывает на папку %s, а нужен файл. Ничего не записано." % (flag, path))
         folder = os.path.dirname(os.path.abspath(path))
         if not os.path.isdir(folder):
             ap.error("%s: папки %s нет. Ничего не записано." % (flag, folder))
