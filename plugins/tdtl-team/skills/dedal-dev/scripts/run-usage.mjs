@@ -28,7 +28,9 @@ export function projectDir(cwd, base = process.env.CLAUDE_CONFIG_DIR || join(hom
 export function latestJsonl(dir) {
   if (!existsSync(dir)) return null;
   let best = null;
-  for (const name of readdirSync(dir)) {
+  let names;
+  try { names = readdirSync(dir); } catch { return null; }   // не папка (.DS_Store и т.п.)
+  for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
     const p = join(dir, name);
     let st;
@@ -98,7 +100,10 @@ export function latestAnyJsonl(base = process.env.CLAUDE_CONFIG_DIR || join(home
 }
 
 export function main(argv) {
-  const file = argv[0] || latestJsonl(projectDir(process.cwd())) || latestAnyJsonl();
+  // самый свежий из папки каталога и из всех папок: в папке рабочей копии может лежать старая расшифровка
+  const here = latestJsonl(projectDir(process.cwd())), any = latestAnyJsonl();
+  const mt = (p) => { try { return p ? statSync(p).mtimeMs : -1; } catch { return -1; } };
+  const file = argv[0] || (mt(any) > mt(here) ? any : here);
   let text;
   try { text = file ? readFileSync(file, "utf8") : null; } catch { text = null; }
   console.log(JSON.stringify(text === null ? {} : summarize(text)));

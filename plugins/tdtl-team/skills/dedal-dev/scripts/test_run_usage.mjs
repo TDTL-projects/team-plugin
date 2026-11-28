@@ -72,3 +72,11 @@ test("T-0814: latestAnyJsonl — самый свежий во всех папк�
   assert.equal(latestAnyJsonl(base), join(a, "s1.jsonl"));
   assert.equal(latestAnyJsonl(join(base, "нет")), null);
 });
+
+test("T-0814: обычный файл в папке projects не роняет поиск", () => {
+  const base = mkdtempSync(join(tmpdir(), "ru-ds-"));
+  mkdirSync(join(base, "projects", "-p"), { recursive: true });
+  writeFileSync(join(base, "projects", ".DS_Store"), "x");
+  writeFileSync(join(base, "projects", "-p", "a.jsonl"), "{}\n");
+  assert.equal(latestAnyJsonl(base), join(base, "projects", "-p", "a.jsonl"));
+});
