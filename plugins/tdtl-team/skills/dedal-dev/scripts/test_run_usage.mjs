@@ -1,10 +1,10 @@
 // node --test plugins/tdtl-team/skills/dedal-dev/scripts/test_*.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectDir, latestJsonl, summarize, main } from "./run-usage.mjs";
+import { projectDir, latestJsonl, latestAnyJsonl, summarize, main } from "./run-usage.mjs";
 
 const rec = (o) => JSON.stringify(o);
 const usage = (i, o, cr = 0, cc = 0) => ({ input_tokens: i, output_tokens: o, cache_read_input_tokens: cr, cache_creation_input_tokens: cc });
@@ -55,4 +55,28 @@ test("нет файла — печатает {} и код 0", () => {
   console.log = (s) => out.push(String(s));
   try { assert.equal(main([join(tmpdir(), "нет-такой-расшифровки.jsonl")]), 0); } finally { console.log = log; }
   assert.deepEqual(out, ["{}"]);
+});
+
+test("T-0814: latestAnyJsonl — самый свежий во всех папках проектов, без subagents", () => {
+  const base = mkdtempSync(join(tmpdir(), "ru-any-"));
+  const a = join(base, "projects", "-home-user"), b = join(base, "projects", "-home-user-app");
+  mkdirSync(join(a, "s1", "subagents"), { recursive: true });
+  mkdirSync(b, { recursive: true });
+  writeFileSync(join(a, "s1.jsonl"), "{}\n");
+  writeFileSync(join(b, "old.jsonl"), "{}\n");
+  writeFileSync(join(a, "s1", "subagents", "agent-x.jsonl"), "{}\n");
+  const now = Date.now() / 1000;
+  utimesSync(join(b, "old.jsonl"), now - 100, now - 100);
+  utimesSync(join(a, "s1.jsonl"), now - 10, now - 10);
+  utimesSync(join(a, "s1", "subagents", "agent-x.jsonl"), now, now);
+  assert.equal(latestAnyJsonl(base), join(a, "s1.jsonl"));
+  assert.equal(latestAnyJsonl(join(base, "нет")), null);
+});
+
+test("T-0814: обычный файл в папке projects не роняет поиск", () => {
+  const base = mkdtempSync(join(tmpdir(), "ru-ds-"));
+  mkdirSync(join(base, "projects", "-p"), { recursive: true });
+  writeFileSync(join(base, "projects", ".DS_Store"), "x");
+  writeFileSync(join(base, "projects", "-p", "a.jsonl"), "{}\n");
+  assert.equal(latestAnyJsonl(base), join(base, "projects", "-p", "a.jsonl"));
 });

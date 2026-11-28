@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Навык dedal-dev (T-0776, учёт расхода T-0772): сумма токенов текущей сессии Claude Code для строки «сессия» в dev_run.
 //   node run-usage.mjs [путь к расшифровке .jsonl]
-// Без аргумента — самый свежий *.jsonl в ~/.claude/projects/<папка текущего каталога>/ (имя папки — путь cwd,
+// Без аргумента — самый свежий *.jsonl из папки текущего каталога и из всех папок ~/.claude/projects/ (T-0814) (имя папки — путь cwd,
 // где «/» и «.» заменены на «-»; корень настроек можно сменить переменной CLAUDE_CONFIG_DIR).
 // Печатает JSON {tokens_in, tokens_out, tokens_total, tool_calls, started_at, ended_at, model}.
 // Нет файла — печатает {} и код 0: честно, среда не отдала.
@@ -28,7 +28,9 @@ export function projectDir(cwd, base = process.env.CLAUDE_CONFIG_DIR || join(hom
 export function latestJsonl(dir) {
   if (!existsSync(dir)) return null;
   let best = null;
-  for (const name of readdirSync(dir)) {
+  let names;
+  try { names = readdirSync(dir); } catch { return null; }   // не папка (.DS_Store и т.п.)
+  for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
     const p = join(dir, name);
     let st;
@@ -80,8 +82,30 @@ export function summarize(text) {
     started_at: first, ended_at: last, model };
 }
 
+/** Самый свежий *.jsonl ведущей сессии во всех папках проектов (T-0814): расшифровка лежит в папке каталога, где сессия
+ *  началась (в облаке — /home/user), а Дедал к концу запуска стоит в рабочей копии — поиск по cwd давал {}.
+ *  Субагенты пишут в <папка>/<сессия>/subagents/ — туда не заходим. */
+export function latestAnyJsonl(base = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude")) {
+  const root = join(base, "projects");
+  if (!existsSync(root)) return null;
+  let best = null;
+  let dirs;
+  try { dirs = readdirSync(root); } catch { return null; }
+  for (const name of dirs) {
+    const p = latestJsonl(join(root, name));
+    if (!p) continue;
+    let t;
+    try { t = statSync(p).mtimeMs; } catch { continue; }
+    if (!best || t > best.t) best = { p, t };
+  }
+  return best ? best.p : null;
+}
+
 export function main(argv) {
-  const file = argv[0] || latestJsonl(projectDir(process.cwd()));
+  // самый свежий из папки каталога и из всех папок: в папке рабочей копии может лежать старая расшифровка
+  const mt = (p) => { try { return p ? statSync(p).mtimeMs : -1; } catch { return -1; } };
+  let file = argv[0];
+  if (!file) { const here = latestJsonl(projectDir(process.cwd())), any = latestAnyJsonl(); file = mt(any) > mt(here) ? any : here; }
   let text;
   try { text = file ? readFileSync(file, "utf8") : null; } catch { text = null; }
   console.log(JSON.stringify(text === null ? {} : summarize(text)));
