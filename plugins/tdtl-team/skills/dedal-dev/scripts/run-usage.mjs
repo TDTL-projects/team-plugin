@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Навык dedal-dev (T-0776, учёт расхода T-0772): сумма токенов текущей сессии Claude Code для строки «сессия» в dev_run.
 //   node run-usage.mjs [путь к расшифровке .jsonl]
-// Без аргумента — самый свежий *.jsonl в ~/.claude/projects/<папка текущего каталога>/, нет — самый свежий во всех папках (T-0814) (имя папки — путь cwd,
+// Без аргумента — самый свежий *.jsonl из папки текущего каталога и из всех папок ~/.claude/projects/ (T-0814) (имя папки — путь cwd,
 // где «/» и «.» заменены на «-»; корень настроек можно сменить переменной CLAUDE_CONFIG_DIR).
 // Печатает JSON {tokens_in, tokens_out, tokens_total, tool_calls, started_at, ended_at, model}.
 // Нет файла — печатает {} и код 0: честно, среда не отдала.
@@ -89,7 +89,9 @@ export function latestAnyJsonl(base = process.env.CLAUDE_CONFIG_DIR || join(home
   const root = join(base, "projects");
   if (!existsSync(root)) return null;
   let best = null;
-  for (const name of readdirSync(root)) {
+  let dirs;
+  try { dirs = readdirSync(root); } catch { return null; }
+  for (const name of dirs) {
     const p = latestJsonl(join(root, name));
     if (!p) continue;
     let t;
@@ -101,9 +103,9 @@ export function latestAnyJsonl(base = process.env.CLAUDE_CONFIG_DIR || join(home
 
 export function main(argv) {
   // самый свежий из папки каталога и из всех папок: в папке рабочей копии может лежать старая расшифровка
-  const here = latestJsonl(projectDir(process.cwd())), any = latestAnyJsonl();
   const mt = (p) => { try { return p ? statSync(p).mtimeMs : -1; } catch { return -1; } };
-  const file = argv[0] || (mt(any) > mt(here) ? any : here);
+  let file = argv[0];
+  if (!file) { const here = latestJsonl(projectDir(process.cwd())), any = latestAnyJsonl(); file = mt(any) > mt(here) ? any : here; }
   let text;
   try { text = file ? readFileSync(file, "utf8") : null; } catch { text = null; }
   console.log(JSON.stringify(text === null ? {} : summarize(text)));
