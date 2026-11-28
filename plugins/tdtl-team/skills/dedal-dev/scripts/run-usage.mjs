@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Навык dedal-dev (T-0776, учёт расхода T-0772): сумма токенов текущей сессии Claude Code для строки «сессия» в dev_run.
 //   node run-usage.mjs [путь к расшифровке .jsonl]
-// Без аргумента — самый свежий *.jsonl в ~/.claude/projects/<папка текущего каталога>/ (имя папки — путь cwd,
+// Без аргумента — самый свежий *.jsonl в ~/.claude/projects/<папка текущего каталога>/, нет — самый свежий во всех папках (T-0814) (имя папки — путь cwd,
 // где «/» и «.» заменены на «-»; корень настроек можно сменить переменной CLAUDE_CONFIG_DIR).
 // Печатает JSON {tokens_in, tokens_out, tokens_total, tool_calls, started_at, ended_at, model}.
 // Нет файла — печатает {} и код 0: честно, среда не отдала.
@@ -80,8 +80,25 @@ export function summarize(text) {
     started_at: first, ended_at: last, model };
 }
 
+/** Самый свежий *.jsonl ведущей сессии во всех папках проектов (T-0814): расшифровка лежит в папке каталога, где сессия
+ *  началась (в облаке — /home/user), а Дедал к концу запуска стоит в рабочей копии — поиск по cwd давал {}.
+ *  Субагенты пишут в <папка>/<сессия>/subagents/ — туда не заходим. */
+export function latestAnyJsonl(base = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude")) {
+  const root = join(base, "projects");
+  if (!existsSync(root)) return null;
+  let best = null;
+  for (const name of readdirSync(root)) {
+    const p = latestJsonl(join(root, name));
+    if (!p) continue;
+    let t;
+    try { t = statSync(p).mtimeMs; } catch { continue; }
+    if (!best || t > best.t) best = { p, t };
+  }
+  return best ? best.p : null;
+}
+
 export function main(argv) {
-  const file = argv[0] || latestJsonl(projectDir(process.cwd()));
+  const file = argv[0] || latestJsonl(projectDir(process.cwd())) || latestAnyJsonl();
   let text;
   try { text = file ? readFileSync(file, "utf8") : null; } catch { text = null; }
   console.log(JSON.stringify(text === null ? {} : summarize(text)));
